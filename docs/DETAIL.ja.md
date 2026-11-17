@@ -1,0 +1,1 @@
+![アイデアやファイルから作品を作れる Cheso の紹介. Cheso で作成したプレゼンテーション、ポスター、動画、製品デモの例. 同じキャンペーンをサイズや配信先に合わせて展開した例。TikTok、Instagram Reels、Facebook Reels に対応. チームで Cheso のプロジェクトを共同編集し、共有権限を管理.](previews/cheso-gallery-en.webp)

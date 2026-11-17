@@ -1,0 +1,1 @@
+![Meet Cheso, a workspace for turning ideas and files into creative work. Examples of presentations, posters, videos, and product demos made with Cheso. One campaign adapted to different sizes and channels, including TikTok, Instagram Reels, and Facebook Reels. Teammates editing a Cheso project together and managing who can access it.](previews/cheso-gallery-en.webp)

@@ -1,0 +1,1 @@
+![Cheso kennenlernen und aus Ideen und Dateien kreative Inhalte erstellen. Beispiele für Präsentationen, Poster, Videos und Produktdemos aus Cheso. Eine Kampagne in unterschiedlichen Formaten für TikTok, Instagram Reels und Facebook Reels. Ein Team bearbeitet ein Cheso-Projekt gemeinsam und verwaltet die Zugriffsrechte.](previews/cheso-gallery-en.webp)
