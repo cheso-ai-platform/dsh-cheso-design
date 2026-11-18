@@ -94,6 +94,8 @@ npm run release -- stable 0.1.1
 
 Use `--dry-run` to preview either channel. The script type-checks, builds, runs tests, and writes the requested version to `package.json` in a temporary staging directory.
 
+The checked-in `package.json` records the last released version: bump it and the lockfile in the same commit you tag, so the repository and npm never disagree.
+
 ### GitHub Actions
 
 After merging [the publish workflow](.github/workflows/publish.yml), open the npm package settings and add a [GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/#configuring-trusted-publishing). Enter `cheso-ai-platform` as the organization, `dsh-cheso-design` as the repository, and `publish.yml` as the workflow filename. Leave Environment blank and allow `npm publish`.

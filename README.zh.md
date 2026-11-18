@@ -94,6 +94,8 @@ npm run release -- stable 0.1.1
 
 两个渠道均可用 `--dry-run` 预览。脚本会执行类型检查、构建和测试，并将指定版本写入临时打包目录中的 `package.json`。
 
+仓库里的 `package.json` 记录最近一次发布的版本：打 tag 时在同一个提交里同步它和 lockfile，保证仓库与 npm 始终一致。
+
 ### GitHub Actions 自动发布
 
 合并[发布工作流](.github/workflows/publish.yml)后，在 npm 包的设置里添加 [GitHub Actions Trusted Publisher](https://docs.npmjs.com/trusted-publishers/#configuring-trusted-publishing)。组织填 `cheso-ai-platform`，仓库填 `dsh-cheso-design`，工作流文件名填 `publish.yml`。Environment 留空，勾选允许 `npm publish`。
