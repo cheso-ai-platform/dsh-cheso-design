@@ -55,13 +55,13 @@ Cheso cards, preview controls and site settings follow the language selected in 
 | `site` | `configured` | `global` uses `https://cheso.ai`. `configured` uses `baseUrl` and `embedBaseUrl`. |
 | `baseUrl` | `https://cheso.ai` | Site used for login and the project API |
 | `embedBaseUrl` | empty (follows `baseUrl`) | Where the preview page is served; point it at a local Vite server while developing |
-| `devSet` | empty | Optional Manager routing id; when set, Host requests carry the `X-Dev-Set` header |
+| `devSet` | empty | Optional Manager routing id sent as `X-Dev-Set` on file-detail requests from the preview route |
 | `timeoutSec` | `540` | Default polling limit between questions or results, in seconds; time spent waiting for your answers does not count |
 | `token` | empty | Optional API token for this `baseUrl`; otherwise the DSH credential store holds the site grant |
 
 ## What leaves your machine
 
-- The prompt you send and the files you attach or reference are uploaded to the selected Cheso site so its agents can work on them.
+- The prompt you send and the files you attach are uploaded to the selected Cheso site. For other local files, DSH asks you to approve the paths and destination before upload.
 - The Cheso grant is stored in the DSH credential store, scoped to that site; `cheso_logout` revokes it.
 - Previews are shown through a short-lived URL that the DSH host signs after checking that the caller is the instance owner. The URL stays in browser memory.
 

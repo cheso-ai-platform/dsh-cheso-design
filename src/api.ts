@@ -6,6 +6,14 @@ export class ChesoApiError extends Error {
   }
 }
 
+export class FixedTokenRejected extends Error {
+  readonly code = 'fixed_token_rejected';
+
+  constructor() {
+    super('Cheso 拒绝了配置的 API token。请更新或移除 DSH 配置中的 token 或启动环境中的 CHESO_API_TOKEN，然后重启 DSH。');
+  }
+}
+
 export type FileDetail = {
   version?: number;
   download_url?: string;
@@ -37,6 +45,10 @@ export class ChesoApi {
     readonly auth: ChesoAuthorization,
     private readonly fixedToken: () => string | undefined,
   ) {}
+
+  get usesFixedToken(): boolean {
+    return Boolean(this.fixedToken());
+  }
 
   /** 退出当前站点的 OAuth 登录。配置了固定 API 令牌时，提示用户从配置移除。 */
   async logout(signal?: AbortSignal) {
@@ -74,8 +86,16 @@ export class ChesoApi {
       token = await this.auth.token(requestSignal, token);
       response = await send();
     }
-    const payload = await response.json().catch(() => null);
-    if (response.status === 401) throw new LoginRequired();
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => {});
+      if (fixed) throw new FixedTokenRejected();
+      throw new LoginRequired();
+    }
+    const payload = await response.json().catch(error => {
+      requestSignal.throwIfAborted();
+      if (!(error instanceof SyntaxError)) throw error;
+      return null;
+    });
     // Cheso 也会在成功的 HTTP 响应中通过非零业务错误码报告失败。
     if (!response.ok || typeof payload?.code === 'number' && payload.code !== 0) {
       const retryAfter = Number(response.headers.get('retry-after'));
@@ -84,6 +104,10 @@ export class ChesoApi {
     if (!payload || typeof payload !== 'object') throw new ChesoApiError(response.status);
     // 兼容带 data 外层的响应和直接返回业务对象的接口。
     return (payload.data ?? payload) as T;
+  }
+
+  whoami(signal?: AbortSignal) {
+    return this.request<{ user?: { username?: string; user_id?: string } }>('/api/v1/whoami', { signal });
   }
 
   /** 读取指定版本的文件详情。省略版本时，读取最新版本。 */

@@ -55,13 +55,13 @@ Cheso 卡片、预览控件和站点设置跟随「设置 → 常规」中的界
 | `site` | `configured` | `global` 使用 `https://cheso.ai`，`configured` 使用 `baseUrl` 和 `embedBaseUrl` |
 | `baseUrl` | `https://cheso.ai` | 登录和项目 API 使用的站点地址 |
 | `embedBaseUrl` | 空（跟随 `baseUrl`） | 预览页所在站点；本地联调时可指向 Vite |
-| `devSet` | 空 | 可选的 Manager 分流标识；设置后 Host 请求会带 `X-Dev-Set` 头 |
+| `devSet` | 空 | 可选的 Manager 分流标识，预览路由查询文件详情时会发送 `X-Dev-Set` |
 | `timeoutSec` | `540` | 每段任务轮询的默认上限（秒），不含用户回答时间 |
 | `token` | 空 | 可选的 API token，对应上面的 `baseUrl`；否则使用 DSH 凭据服务保存的站点授权 |
 
 ## 会离开本机的数据
 
-- 你发送的需求，以及你附加或引用的文件，会上传到所选 Cheso 站点，供其 agent 处理。
+- 你发送的需求和附加的文件会上传到所选 Cheso 站点。上传其他本地文件前，DSH 会请你确认文件路径和目标站点。
 - Cheso 授权保存在 DSH 凭据服务中，按站点区分；`cheso_logout` 会撤销该授权。
 - 预览地址由 DSH 宿主在校验访问者为本实例所有者后签发，只在浏览器内存中使用。
 

@@ -46,6 +46,7 @@
     "loginWaiting": "承認待ちです。Cheso で手続きを完了してから、もう一度確認してください。",
     "loginNotStarted": "ログインが開始されていないか、キャンセルされました。新しい認証リンクを取得してください。",
     "loginFailed": "Cheso にログインできませんでした。もう一度お試しください。",
+    "fixedTokenRejected": "Cheso が設定済みの API トークンを拒否しました。DSH の設定または起動環境でトークンを更新または削除し、DSH を再起動してください。",
     "loginInvalidLink": "Cheso から有効な認証リンクが返されませんでした。",
     "loginUnknownSite": "この Cheso サイトは現在の設定にありません。サイト設定を確認して、もう一度お試しください。",
     "previewTitle": "Cheso プレビュー",

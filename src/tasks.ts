@@ -51,18 +51,23 @@ type StopResult = Pick<WaitResult, 'task_id' | 'status' | 'files'>;
 const TERMINAL = new Set(['completed', 'failed', 'terminated', 'rolled_back']);
 
 /** 沿任务接续链查询结果，返回当前链尾的任务 ID 与状态。 */
-async function resultFor(api: ChesoApi, taskId: string, signal?: AbortSignal) {
+type Handoff = (nextId: string, activeId?: string) => void;
+
+async function resultFor(api: ChesoApi, taskId: string, signal?: AbortSignal, onHandoff?: Handoff) {
   const visited = new Set<string>();
   let id = taskId;
+  let activeId: string | undefined;
   // 已结束的任务阶段也可能交接给下一阶段，但硬终止会结束本次执行。
   while (!visited.has(id) && visited.size < 30) {
     visited.add(id);
     const result = await api.request<PlanResult>(`/api/v1/plans/${chesoId(id)}/result`, { signal });
     if (result.reason === 'hard_stopped' || result.status === 'hard_stopped') {
-      return { id, result: { ...result, status: 'terminated', reason: undefined } };
+      return { id, result: { ...result, status: 'terminated', reason: undefined }, activeId: undefined };
     }
-    if (!result.next_plan_id) return { id, result };
-    id = result.next_plan_id;
+    if (!TERMINAL.has(result.status) && result.status !== 'pending') activeId = id;
+    if (!result.next_plan_id) return { id, result, activeId };
+    id = chesoId(result.next_plan_id);
+    if (!visited.has(id)) onHandoff?.(id, activeId);
   }
   throw new Error('Cheso 任务接续链异常。');
 }
@@ -119,19 +124,39 @@ export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: s
     task_id: id, status: result.status,
     ...(result.status === 'terminated' ? { files: filesOf(result) } : {}),
   });
-  const { id, result } = await resultFor(api, taskId, signal);
+  const stopTarget = async (chain: Awaited<ReturnType<typeof resultFor>>) => {
+    if (chain.result.status !== 'pending') return chain.id;
+    // 交接中的新阶段还未启动。重新查询已知的前序链，跳过已结束的阶段。
+    if (chain.activeId) return chain.activeId;
+    if (!previousTaskId || previousTaskId === chain.id) return chain.id;
+    const previous = await resultFor(api, previousTaskId, signal);
+    // 前序链还未发布 next_plan_id 时，保留补充消息提交时记录的执行链。
+    return previous.activeId ?? chain.id;
+  };
+  const { id, result, activeId } = await resultFor(api, taskId, signal);
   if (TERMINAL.has(result.status)) return stoppedResult(id, result);
 
-  // 刚插入的任务还在交接时，Cheso 需要从执行链上已经开始的任务接收停止请求。
-  const stopId = result.status === 'pending' ? previousTaskId ?? taskId : id;
+  const stopId = await stopTarget({ id, result, activeId });
   try {
     await api.request(`/api/v1/plans/${chesoId(stopId)}/terminate`, { body: {}, signal });
   } catch (error) {
     // 查询状态与停止之间，任务可能恰好结束或还在交接。
     if (!(error instanceof ChesoApiError && error.code === 1101)) throw error;
     const latest = await resultFor(api, taskId, signal);
-    if (!TERMINAL.has(latest.result.status) && latest.result.status !== 'pending') throw error;
-    return stoppedResult(latest.id, latest.result);
+    if (TERMINAL.has(latest.result.status)) return stoppedResult(latest.id, latest.result);
+    const nextStopId = await stopTarget(latest);
+    if (nextStopId === stopId) {
+      if (latest.result.status === 'pending') return stoppedResult(latest.id, latest.result);
+      throw error;
+    }
+    try {
+      await api.request(`/api/v1/plans/${chesoId(nextStopId)}/terminate`, { body: {}, signal });
+    } catch (retryError) {
+      if (!(retryError instanceof ChesoApiError && retryError.code === 1101)) throw retryError;
+      const settled = await resultFor(api, taskId, signal);
+      if (TERMINAL.has(settled.result.status) || settled.result.status === 'pending') return stoppedResult(settled.id, settled.result);
+      throw retryError;
+    }
   }
 
   const deadline = AbortSignal.timeout(10_000);
@@ -155,7 +180,7 @@ export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: s
 /** 轮询当前任务直到结束或出现待答问题。等待超时时返回可继续查询的任务 ID。 */
 export async function waitForTask(
   api: ChesoApi, taskId: string, timeoutSec: number, knownProject: string | undefined,
-  signal?: AbortSignal, repliedQuestion?: string,
+  signal?: AbortSignal, repliedQuestion?: string, onHandoff?: Handoff,
 ): Promise<WaitResult> {
   // 调用方取消时抛出取消错误。仅本次等待超时时，保留任务 ID 供后续继续等待。
   const timeout = AbortSignal.timeout(Math.floor(timeoutSec * 1000));
@@ -168,7 +193,10 @@ export async function waitForTask(
     while (!waitSignal.aborted) {
       let delay = 3000;
       try {
-        latest = await resultFor(api, current, waitSignal);
+        latest = await resultFor(api, current, waitSignal, (id, activeId) => {
+          current = id;
+          onHandoff?.(id, activeId);
+        });
         current = latest.id;
         failures = 0;
         // 已提交的提问可能短暂留在结果中；等 Cheso 更新后再显示下一批。
@@ -206,22 +234,22 @@ export async function waitForTask(
       if (error instanceof LoginRequired) throw error;
       return { project_id: undefined };
     })).project_id;
-  let files = filesOf(result);
   const questions = waitingForUser ? questionsOf(result.interaction) : [];
   const message = waitingForUser ? questions.map(({ question, options }, index) =>
     `${index + 1}. ${question}${options?.length ? `（${options.map(option => option.label).join(' / ')}）` : ''}`).join('\n') : result.reason;
-  // 完成响应缺少文件列表时，查项目目录补齐卡片，只取标记为成品的文件。
-  if (!result.result?.files?.length && projectId && result.status === 'completed') {
-    files = (await api.projectFiles(projectId, signal)).filter(file => file.category === 'result');
-  }
-  // 卡片携带文件 ID，打开预览时再按需查询文件内容。
+  // 只交付任务快照确认的文件，项目目录可能包含其他任务的成品。
   return {
     task_id: current, status: result.status, done: TERMINAL.has(result.status),
-    project_id: projectId, answer: result.result?.text, message, files,
+    project_id: projectId, answer: result.result?.text, message, files: filesOf(result),
     ...(waitingForUser ? {
       interaction: { key: interactionKey(current, result.interaction), questions, previews: questionPreviews(result.interaction) },
     } : {}),
   };
+}
+
+/** 目前 Cheso 按题干接收答案。同批重复题干需要在 Cheso 内处理。 */
+export function hasDuplicateQuestions(questions: Question[]): boolean {
+  return new Set(questions.map(question => question.question)).size !== questions.length;
 }
 
 /** 将 Cheso 题目转换为 DSH 问答格式，并按顺序分配题目 ID。 */
@@ -276,6 +304,7 @@ export async function replyToTask(
   submissionSignal = signal,
 ): Promise<QuestionReceipt | 'changed' | 'expired'> {
   signal?.throwIfAborted();
+  if (hasDuplicateQuestions(question.questions)) throw new Error('这批提问包含重复题干，请在 Cheso 项目中回答。');
   const questions = userQuestionsFor(question.questions);
   const answers = new Map(reply.answers.map(answer => [answer.id, answer]));
   if (!questions.length || answers.size !== questions.length || reply.answers.length !== questions.length) {

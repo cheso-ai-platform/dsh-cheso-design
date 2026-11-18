@@ -5,15 +5,16 @@
  * 预览页与 ChatGPT 插件共用 `/embed/preview`，消息协议一致。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defineTool, type ToolDispatchExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import z from '@deepseek-ai/schemastery';
-import { ChesoApi, ChesoApiError, chesoId, type ChesoFile } from './api';
+import { ChesoApi, ChesoApiError, FixedTokenRejected, chesoId, type ChesoFile } from './api';
 import { CHESO_CALLBACK_PATH, ChesoAuthorization, LoginAttemptError, LoginRequired, type CredentialStore } from './auth';
 import { isEmbedFormat } from './embed-format';
-import { uploadAttachment } from './files';
-import { askWhileQuestionIsOpen, replyToTask, stopTask, waitForTask, type QuestionPreview, type QuestionReceipt } from './tasks';
-import { CHESO_SITE_OPTIONS, CHESO_SITES, type ChesoSite, type SiteOptions } from './sites';
+import { uploadAttachments, userAttachmentBlocks } from './files';
+import { askWhileQuestionIsOpen, hasDuplicateQuestions, replyToTask, stopTask, waitForTask, type QuestionPreview, type QuestionReceipt } from './tasks';
+import { CHESO_SITE_OPTIONS, CHESO_SITES, projectSite, type ChesoSite, type SiteOptions } from './sites';
 
 export const name = 'cheso';
 
@@ -54,6 +55,21 @@ type PlanSubmission = {
   plan_status?: string;
   queued?: boolean;
   message?: { message_id?: string };
+};
+
+type CreateRequest = {
+  prompt?: string;
+  files?: string[];
+  project_id?: string;
+  follow_up_task_id?: string;
+  agent_type?: string;
+};
+
+type CreateRetry = {
+  request: CreateRequest;
+  baseUrl: string;
+  attachmentBlocks: ReturnType<typeof userAttachmentBlocks>;
+  inFlight?: boolean;
 };
 
 const STOP_SUMMARY = 'Cheso 任务已停止。请用一两句话告知用户，按需提及任务结果列出的成品和项目链接。不要再查询项目文件、继续等待或重新提交任务。';
@@ -189,6 +205,8 @@ const artifactCardSchema = {
     },
     embed_base_url: { type: 'string' },
     base_url: { type: 'string' },
+    retry_call_id: { type: 'string' },
+    previous_task_id: { type: 'string' },
     message: { type: 'string' },
     answer: { type: 'string' },
   },
@@ -234,6 +252,8 @@ function cardPayload(view: Record<string, unknown>, config: ChesoConfig, extra: 
     answer: typeof view.answer === 'string' ? view.answer.slice(0, 1200) : undefined,
     artifacts: artifactsOf(view),
     embed_base_url: trimBaseUrl(config.embedBaseUrl),
+    base_url: config.baseUrl,
+    previous_task_id: typeof view.previous_task_id === 'string' ? view.previous_task_id : undefined,
     ...extra,
   });
 }
@@ -300,6 +320,54 @@ function renderCard(payload: Record<string, unknown>, headline: string): { type:
   return [{ type: 'text', text: lines.join('\n') }];
 }
 
+/** 按从新到旧的顺序读取宿主保留的 Cheso 工具卡片。 */
+function* historicalCards(agent: ToolDispatchExecution['agent']): Generator<Record<string, unknown>> {
+  const messages = agent?.session?.deriveMessages?.() ?? [];
+  const names = new Set(['cheso_create', 'cheso_wait', 'cheso_stop', 'cheso_login', 'cheso_project_files']);
+  const calls = new Set(messages.flatMap(message => message.role === 'assistant'
+    ? message.content.flatMap(block => block.type === 'tool-call' && names.has(block.name) ? [block.id] : [])
+    : []));
+  for (const message of messages.reverse()) {
+    if (message.role !== 'tool' || message.isError || !calls.has(message.source.callId)) continue;
+    for (const block of message.content) {
+      if (block.type !== 'text') continue;
+      const marker = '\n[cheso-card]';
+      const start = block.text.lastIndexOf(marker);
+      if (start < 0) continue;
+      try {
+        const card = JSON.parse(block.text.slice(start + marker.length));
+        if (card && typeof card === 'object' && !Array.isArray(card)) yield card;
+      } catch {
+        // 旧工具结果可能缺少完整的卡片数据。
+      }
+    }
+  }
+}
+
+/** 从宿主保留的 Cheso 工具结果恢复原站点，兼容只有项目链接的历史卡片。 */
+function historicalTask(taskId: string, agent: ToolDispatchExecution['agent']) {
+  const routes = new Map<string, { projectId?: string; previousTaskId?: string }>();
+  for (const card of historicalCards(agent)) {
+    if (card.task_id !== taskId || card.status === 'login_required') continue;
+    const base = typeof card.base_url === 'string' ? card.base_url : projectSite(card.project_url);
+    if (!base) continue;
+    const route = routes.get(base) ?? {};
+    if (typeof card.project_id === 'string') route.projectId ??= card.project_id;
+    if (typeof card.previous_task_id === 'string') route.previousTaskId ??= card.previous_task_id;
+    routes.set(base, route);
+  }
+  return routes;
+}
+
+/** 浏览器授权后，继续检查对话中最近一张登录卡对应的站点。 */
+function historicalLoginSite(agent: ToolDispatchExecution['agent']): string | undefined {
+  for (const { status, base_url } of historicalCards(agent)) {
+    if ((status === 'login_pending' || status === 'login_required') && typeof base_url === 'string' && base_url) {
+      return base_url;
+    }
+  }
+}
+
 /** 按项目来源选择预览所用站点。旧卡仅有预览地址时，要求它唯一对应一个 API 站点。 */
 function previewSite(configs: ChesoConfig[], projectUrl: string | null, embedBaseUrl: string | null): ChesoConfig | undefined {
   if (projectUrl) {
@@ -348,15 +416,57 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
   /** 在每次调用时读取当前站点配置，使站点切换即时生效。 */
   const currentConfig = () => configs[pluginConfig.site.get()];
   const previewConfigs = Object.values(configs);
-  // 绑定运行中的任务与创建时的站点。该记录随宿主端重启清空。
-  const pendingTasks = new Map<string, {
+  const configForSite = (baseUrl: unknown) => baseUrl === undefined
+    ? currentConfig() : previewConfigs.find(config => config.baseUrl === baseUrl);
+  const unknownSite = '该站点已不在插件配置中。请检查站点设置并重新发起请求。';
+  const createRetries = new WeakMap<object, Map<string, CreateRetry>>();
+  type TaskRoute = {
     config: ChesoConfig;
     projectId?: string;
     agentType?: string;
     previousTaskId?: string;
+  };
+  type PendingTask = TaskRoute & {
     asking?: boolean;
     repliedQuestion?: string;
-  }>();
+  };
+  const pendingTasks = new Map<string, PendingTask>();
+  const recentTaskRoutes = new Map<string, TaskRoute>();
+  const routingKey = (config: ChesoConfig, id: string) => JSON.stringify([config.baseUrl, id]);
+  const rememberTask = (id: string, { config, projectId, agentType, previousTaskId }: TaskRoute) => {
+    const key = routingKey(config, id);
+    recentTaskRoutes.delete(key);
+    recentTaskRoutes.set(key, { config, projectId, agentType, previousTaskId });
+    if (recentTaskRoutes.size > 1024) recentTaskRoutes.delete(recentTaskRoutes.keys().next().value!);
+  };
+  const routeTask = (id: string, site: string | undefined, agent: ToolDispatchExecution['agent']): PendingTask => {
+    chesoId(id);
+    const history = historicalTask(id, agent);
+    // 会话历史优先于宿主级缓存，且同一 ID 在不同站点的路由数据独立保存。
+    const cachedSites = new Set<string>();
+    for (const config of previewConfigs) {
+      const key = routingKey(config, id);
+      if (pendingTasks.has(key) || recentTaskRoutes.has(key)) cachedSites.add(config.baseUrl);
+    }
+    const knownSites = history.size ? new Set(history.keys()) : cachedSites;
+    if (site && knownSites.size && !knownSites.has(site) && !cachedSites.has(site)) {
+      throw new Error('指定的 Cheso 站点与原任务不一致。');
+    }
+    if (!site && knownSites.size > 1) throw new Error('多个 Cheso 站点存在相同任务 ID，请传入原任务结果中的 base_url。');
+    const base = site || knownSites.values().next().value;
+    const selected = currentConfig();
+    const config = !base || selected.baseUrl === base ? selected : previewConfigs.find(candidate => candidate.baseUrl === base);
+    if (!config) throw new Error('原任务的 Cheso 站点已不在插件配置中，请恢复原站点配置后重试。');
+    const key = routingKey(config, id);
+    const remembered = recentTaskRoutes.get(key);
+    const saved = history.get(config.baseUrl);
+    return pendingTasks.get(key) ?? {
+      config: remembered?.config ?? config,
+      projectId: remembered?.projectId ?? saved?.projectId,
+      previousTaskId: remembered?.previousTaskId ?? saved?.previousTaskId,
+      agentType: remembered?.agentType,
+    };
+  };
   type QuestionActivity = { previews: QuestionPreview[] | null; receipts: QuestionReceipt[] };
   const waitQuestionActivity = new Map<string, QuestionActivity>();
   const receiptsByExecution = new WeakMap<ToolDispatchExecution, QuestionReceipt[]>();
@@ -377,6 +487,10 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
   }, { global: true });
   /** 根据 DSH 对外地址选择浏览器授权或设备码授权，并返回当前挑战。 */
   const login = async (config: ChesoConfig, signal: AbortSignal) => {
+    if (config.api.usesFixedToken) {
+      await config.api.whoami(signal);
+      return { status: 'signed_in', base_url: config.baseUrl };
+    }
     const webServer = ctx.get('webServer');
     let root: string | undefined;
     if (webServer) {
@@ -392,8 +506,11 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
   /** 短暂检查站点授权，将结果归纳为已登录、等待中或需要登录。 */
   const checkLogin = async (config: ChesoConfig, signal: AbortSignal) => {
     try {
-      const signedIn = await config.api.auth.wait(4000, signal);
-      return { status: signedIn ? 'signed_in' : 'waiting', base_url: config.baseUrl };
+      if (!config.api.usesFixedToken && !await config.api.auth.wait(4000, signal)) {
+        return { status: 'waiting', base_url: config.baseUrl };
+      }
+      await config.api.whoami(AbortSignal.any([signal, AbortSignal.timeout(5000)]));
+      return { status: 'signed_in', base_url: config.baseUrl };
     } catch (error) {
       if (!(error instanceof LoginRequired)) throw error;
       return { status: 'login_required', base_url: config.baseUrl };
@@ -406,14 +523,17 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       order: promptCtx.systemPrompt.getSectionOrder('TOOLS_SDK'),
       text:
         'For Cheso requests in DSH, use only the native dsh-cheso-design cheso_* tools. The catalog entry named cheso is a separate CLI workflow: do not load it or run Cheso shell commands, even if that skill was loaded earlier. The two integrations have separate sign-ins. ' +
-        'Start deliverable requests with cheso_create, without a login preflight. If a tool returns login_required, direct the user to its DSH login card. Use cheso_login for an explicit sign-in request, cheso_login_wait after the user authorizes, and cheso_whoami when asked about the account. If the plugin does not support an action, direct the user to Cheso. ' +
+        'Start deliverable requests with cheso_create, without a login preflight. If a tool returns login_required, direct the user to its DSH login card. Use cheso_login for an explicit sign-in request, cheso_login_wait with the authorization card base_url after the user authorizes, and cheso_whoami when asked about the account. If the plugin does not support an action, direct the user to Cheso. ' +
+        'After the user completes OAuth and asks to continue a blocked creation, call cheso_create with the retry_call_id from that creation result. It reuses the original request, attachments, and site; do not compose a new request. If a fixed API token was rejected, tell the user to update or remove it in their DSH configuration or startup environment. ' +
         'When creating or revising a deliverable in a named project, call cheso_create directly with project_id. ' +
         'Copy the user’s original task wording into cheso_create.prompt verbatim, including their priorities. ' +
+        'For files the user asks Cheso to use, pass the attachment names or exact paths in cheso_create.files. ' +
         'Include earlier user-provided or user-approved text only when the user explicitly refers to it. ' +
         'Do not rewrite, expand, or add an audience, language, style, outline, output format, or other requirements. Leave unspecified choices to Cheso. ' +
         'Use cheso_project_files with show_card: true when the user asks to see the project files or artifacts. ' +
         'Leave show_card unset when checking project files for your own context. ' +
         'After creation, use one cheso_wait call at a time and continue with the existing task if it is still running. ' +
+        'When waiting, stopping, or following up on a task, pass the original result base_url as task_site when available. ' +
         'Treat terminated (including hard_stopped) as final. Briefly report the stop and any artifacts confirmed by the task result. Do not list project files, wait again, or resubmit the stopped task. ' +
         'If the user asks to stop a Cheso task, call cheso_stop with the task ID from this conversation. When cheso_wait yields to a stop request, handle it with cheso_stop and report the returned status. ' +
         'When cheso_wait yields to a new user message, address that message first. To pass a correction or extra instructions for the active Cheso task, call cheso_create with follow_up_task_id set to that task ID and prompt set to the user’s exact message. Wait on the returned task ID. If no task ID is returned for the follow-up, tell the user the result and link to the Cheso project without resubmitting. ' +
@@ -482,12 +602,13 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       parameters: {
         prompt: {
           type: 'string',
-          required: true,
-          description: '逐字传入用户的任务原话。只在用户明确引用前文时附上用户提供或确认的相关原文。不要改写，也不要补充受众、语言、风格、大纲、输出格式或其他未指定的信息。',
+          description: '新建时必须逐字传入用户的任务原话。只在用户明确引用前文时附上用户提供或确认的相关原文。不要改写，也不要补充受众、语言、风格、大纲、输出格式或其他未指定的信息。',
         },
-        files: { type: 'array', items: { type: 'string' }, description: '要作为参考的本地文件路径。' },
+        files: { type: 'array', items: { type: 'string' }, description: '用户指定的参考附件名称或路径。直接附加在当前消息中的文件可按名称引用；其它本地文件需要用户确认上传。' },
         project_id: { type: 'string', description: '继续在已有 Cheso 项目中创建或修改产物时，传入用户提供的项目 ID 或完整项目链接。' },
         follow_up_task_id: { type: 'string', description: '给 Cheso 对话发送更正或补充消息时，传入 cheso_create 或 cheso_wait 返回的当前任务 ID。' },
+        task_site: { type: 'string', description: '原任务或授权卡中的 base_url。省略时，新请求使用当前站点。' },
+        retry_call_id: { type: 'string', description: '授权完成后继续创建时，只传之前 login_required 结果的 retry_call_id，插件会恢复原请求。' },
         agent_type: { type: 'string', description: 'cheso（默认）或 image_edit。' },
       },
       output: {
@@ -503,13 +624,30 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           ),
       },
       /** 检查积分、上传参考附件并创建任务，同时记住任务所属站点。 */
-      async execute({ prompt, files, project_id, follow_up_task_id, agent_type }, exec) {
-        const followedTask = follow_up_task_id ? pendingTasks.get(follow_up_task_id) : undefined;
-        const config = followedTask?.config ?? currentConfig();
+      async execute({ retry_call_id, task_site, ...input }, exec) {
+        const session = exec.agent?.session;
+        const retries = session && createRetries.get(session);
+        const retry = retry_call_id ? retries?.get(retry_call_id) : undefined;
+        if (retry_call_id && !retry) throw new Error('原创建请求已不可恢复或已处理，请核对任务状态；如需重新创建，请重新发送需求和附件。');
+        if (retry?.inFlight) throw new Error('原创建请求正在重试。');
+        if (retry && ((task_site !== undefined && task_site !== retry.baseUrl)
+            || Object.entries(input).some(([key, value]) => value !== undefined
+              && JSON.stringify(value) !== JSON.stringify(retry.request[key as keyof CreateRequest])))) {
+          throw new Error('重试须沿用原站点和原请求。');
+        }
+        const request = retry?.request ?? input;
+        const { prompt, files, project_id, follow_up_task_id, agent_type } = request;
+        if (!prompt?.trim()) throw new Error('请提供任务需求。');
+        const site = retry?.baseUrl ?? task_site;
+        const followedTask = follow_up_task_id ? routeTask(follow_up_task_id, site, exec.agent) : undefined;
+        const config = followedTask?.config ?? configForSite(site);
+        if (!config) throw new Error(unknownSite);
         const agentType = followedTask?.agentType || agent_type || undefined;
+        const attachmentBlocks = retry?.attachmentBlocks ?? (files?.length ? userAttachmentBlocks(exec.agent) : []);
         const signal = exec.signal;
+        let waitingForLogin = false;
+        if (retry) retry.inFlight = true;
         try {
-          if (!prompt.trim()) throw new Error('请提供任务需求。');
           let projectId = project_id ? projectIdFromReference(project_id, config.baseUrl) : undefined;
           let sessionId: string | undefined;
           if (follow_up_task_id) {
@@ -526,21 +664,17 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
             // 积分查询是创建任务的前置提示。对话补充由 Cheso 按当前任务状态处理。
             const balance = await config.api.credits(signal).catch(error => {
               signal?.throwIfAborted();
-              if (error instanceof LoginRequired) throw error;
+              if (error instanceof LoginRequired || error instanceof FixedTokenRejected) throw error;
               return undefined;
             });
             if (balance !== undefined && balance <= 0) {
               return { status: 'insufficient_credits', message: 'Cheso 积分不足。', embed_base_url: config.embedBaseUrl };
             }
           }
-          const attachments: string[] = [];
-          if (files?.length) {
-            const cwd = await ctx.workingDirectory.ensure(exec.agent, signal);
-            for (const filename of files) {
-              // 补充消息的附件先上传，Cheso 在消息出队时绑定到项目。
-              attachments.push(await uploadAttachment(config.api, path.resolve(cwd, filename), sessionId ? undefined : projectId, signal));
-            }
-          }
+          // 补充消息的附件先上传，Cheso 在消息出队时绑定到项目。
+          const attachments = files?.length
+            ? await uploadAttachments(ctx, config.api, files, sessionId ? undefined : projectId, exec, attachmentBlocks)
+            : [];
           let created = await config.api.request<PlanSubmission>(
             '/api/v1/plans/create', {
               body: {
@@ -576,13 +710,26 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           if (!created.plan_id) throw new Error('Cheso 未返回任务 ID。');
           const project = created.project_id || projectId;
           const previousTaskId = created.plan_status === 'pending' ? followedTask?.previousTaskId ?? follow_up_task_id : undefined;
-          pendingTasks.set(created.plan_id, { config, projectId: project, agentType, previousTaskId });
+          const route = { config, projectId: project, agentType, previousTaskId };
+          pendingTasks.set(routingKey(config, created.plan_id), route);
+          rememberTask(created.plan_id, route);
           return cardPayload({
-            task_id: created.plan_id, status: created.plan_status || 'in_progress',
+            task_id: created.plan_id, previous_task_id: previousTaskId, status: created.plan_status || 'in_progress',
             project_id: project, project_url: project ? config.api.projectUrl(project) : undefined,
           }, config);
         } catch (error) {
+          if (error instanceof LoginRequired && session) {
+            const retryId = retry_call_id ?? randomUUID();
+            const sessionRetries = retries ?? new Map<string, CreateRetry>();
+            sessionRetries.set(retryId, { request, baseUrl: config.baseUrl, attachmentBlocks });
+            if (!retries) createRetries.set(session, sessionRetries);
+            waitingForLogin = true;
+            return { ...toolFailure(error, config), retry_call_id: retryId };
+          }
           return toolFailure(error, config);
+        } finally {
+          // 只有明确的未登录结果可以再次重试，避免在写入结果不明时重复提交。
+          if (retry_call_id && !waitingForLogin) retries?.delete(retry_call_id);
         }
       },
     }),
@@ -601,6 +748,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         '任务完成后返回在线产物卡和 Cheso 项目链接，直接用它们交付。产物保存在 Cheso。',
       parameters: {
         task_id: { type: 'string', required: true, description: 'cheso_create 返回的 task_id。' },
+        task_site: { type: 'string', description: '原任务结果中的 base_url（如有）。' },
         timeout_sec: { type: 'number', description: '每段轮询的等待上限，不含用户回答时间，默认使用插件配置。' },
       },
       output: {
@@ -622,8 +770,8 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         },
       },
       /** 继续轮询原站点上的任务，处理每轮提问并保留已提交的答复记录。 */
-      async execute({ task_id, timeout_sec }, exec) {
-        let pending = pendingTasks.get(task_id) ?? { config: currentConfig() };
+      async execute({ task_id, task_site, timeout_sec }, exec) {
+        let pending = routeTask(task_id, task_site, exec.agent);
         const { config } = pending;
         let current = task_id;
         const activity: QuestionActivity = { previews: null, receipts: [] };
@@ -644,21 +792,28 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           const timeout = Math.min(Math.max(Number(timeout_sec) || config.timeoutSec, 10), 1800);
           for (;;) {
             const repliedQuestion = pending.repliedQuestion;
-            const result = await waitForTask(config.api, current, timeout, pending.projectId, waitSignal, repliedQuestion);
+            const result = await waitForTask(config.api, current, timeout, pending.projectId, waitSignal, repliedQuestion, (id, activeId) => {
+              current = id;
+              pending = pendingTasks.get(routingKey(config, id)) ?? pending;
+              if (activeId) pending.previousTaskId = activeId;
+              rememberTask(id, pending);
+            });
             if (result.status === 'terminated') exec.signal?.throwIfAborted();
             else waitSignal.throwIfAborted();
             current = result.task_id;
-            const routedTask = pendingTasks.get(current);
-            if (routedTask?.config === config) pending = routedTask;
+            const routedTask = pendingTasks.get(routingKey(config, current));
+            if (routedTask) pending = routedTask;
+            pending.projectId = result.project_id ?? pending.projectId;
+            rememberTask(task_id, pending);
+            rememberTask(current, pending);
             if (result.done) {
-              for (const [id, task] of pendingTasks) {
-                if (task === pending || id === task_id || id === current) pendingTasks.delete(id);
+              for (const [key, task] of pendingTasks) {
+                if (task === pending || key === routingKey(config, task_id) || key === routingKey(config, current)) pendingTasks.delete(key);
               }
             } else {
               // 保留接续链末端和初始 ID 对创建站点的绑定，切站后也能回复原任务。
-              pending.projectId = result.project_id;
-              pendingTasks.set(task_id, pending);
-              pendingTasks.set(current, pending);
+              pendingTasks.set(routingKey(config, task_id), pending);
+              pendingTasks.set(routingKey(config, current), pending);
               if (result.status === 'running' && pending.repliedQuestion === repliedQuestion) {
                 pending.repliedQuestion = result.repliedQuestion;
               }
@@ -666,7 +821,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
             if (result.status === 'terminated') return await stoppedCard(result, config, exec.signal, receiptFields());
             const interaction = result.interaction;
             if (interaction && pending.repliedQuestion === interaction.key) continue;
-            const userQuestions = interaction?.questions.length && !pending.asking && exec.agent
+            const userQuestions = interaction?.questions.length && !hasDuplicateQuestions(interaction.questions) && !pending.asking && exec.agent
               ? ctx.get('userQuestions') : undefined;
             if (interaction && userQuestions) {
               pending.asking = true;
@@ -692,16 +847,17 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
                 : 'Cheso 正在等待你的回复。请打开 Cheso 项目，回答或跳过后回到这里继续。'].filter(Boolean).join('\n')
               : result.message;
             return cardPayload({
-              ...result, message,
+              ...result, message, previous_task_id: pending.previousTaskId,
               project_url: result.project_id ? config.api.projectUrl(result.project_id) : undefined,
             }, config, receiptFields());
           }
         } catch (error) {
           exec.signal?.throwIfAborted();
           if (steering.signal.aborted) {
-            pendingTasks.set(task_id, pending);
+            pendingTasks.set(routingKey(config, task_id), pending);
+            pendingTasks.set(routingKey(config, current), pending);
             return cardPayload({
-              task_id: current, status: 'running', project_id: pending.projectId,
+              task_id: current, status: 'running', project_id: pending.projectId, previous_task_id: pending.previousTaskId,
               project_url: pending.projectId ? config.api.projectUrl(pending.projectId) : undefined,
               message: '已结束本次等待以处理用户插话。请先处理新消息。',
             }, config, receiptFields());
@@ -721,32 +877,34 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       description: '用户要求停止 Cheso 任务时，终止该任务所在的执行链。确认终止后返回停止状态及任务结果中的成品。返回 stopping 表示已发出停止请求。',
       parameters: {
         task_id: { type: 'string', required: true, description: '要停止的 Cheso 任务 ID，来自 cheso_create 或 cheso_wait。' },
+        task_site: { type: 'string', description: '原任务结果中的 base_url（如有）。' },
       },
       output: {
         schema: artifactCardSchema,
         render: (_args, value) => {
           const { task_id, status } = value;
           if (status === 'terminated') return renderCard(value, STOP_SUMMARY);
+          if (status === 'login_required') return renderCard(value, DSH_LOGIN_REQUIRED);
           const messages: Record<string, string> = {
             stopping: 'Cheso 已收到停止请求，正在等待任务结束。',
             completed: 'Cheso 任务已完成。',
             failed: 'Cheso 任务已失败。',
             rolled_back: 'Cheso 任务已回滚。',
-            pending: 'Cheso 正在交接任务。请使用交接前的任务 ID 停止执行链。',
-            login_required: '请先连接 Cheso 账号，再停止任务。',
+            pending: 'Cheso 正在交接任务，尚未确认停止。请稍后重试。',
           };
-          return [{ type: 'text', text: `${messages[status ?? ''] ?? '请检查 Cheso 任务状态。'} 任务 ID：${task_id ?? ''}` }];
+          return renderCard(value, `${messages[status ?? ''] ?? '请检查 Cheso 任务状态。'} 任务 ID：${task_id ?? ''}`);
         },
       },
-      async execute({ task_id }, exec) {
-        const task = pendingTasks.get(task_id);
-        const config = task?.config ?? currentConfig();
+      async execute({ task_id, task_site }, exec) {
+        const task = routeTask(task_id, task_site, exec.agent);
+        const { config } = task;
         try {
-          const result = await stopTask(config.api, task_id, task?.previousTaskId, exec.signal);
-          if (result.status === 'terminated') return await stoppedCard({ ...result, project_id: task?.projectId }, config, exec.signal);
-          return { task_id: result.task_id, status: result.status };
+          const result = await stopTask(config.api, task_id, task.previousTaskId, exec.signal);
+          rememberTask(result.task_id, task);
+          if (result.status === 'terminated') return await stoppedCard({ ...result, project_id: task.projectId }, config, exec.signal);
+          return { task_id: result.task_id, status: result.status, base_url: config.baseUrl };
         } catch (error) {
-          if (error instanceof LoginRequired) return { task_id, status: 'login_required' };
+          if (error instanceof LoginRequired) return toolFailure(error, config, task_id);
           if (error instanceof ChesoApiError && error.code === 2313) {
             throw new Error('只有 Cheso 任务发起人或该项目的所有者可以停止任务。');
           }
@@ -812,8 +970,9 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
             expires_at: { type: 'number' },
           },
         },
-        render: (_args, value) => renderCard(value,
-          'Cheso 授权卡已显示。请用户在浏览器完成授权，然后回到 DSH 检查登录。等待用户回复后再继续。'),
+        render: (_args, value) => value.status === 'signed_in'
+          ? [{ type: 'text', text: 'Cheso 已登录。' }]
+          : renderCard(value, 'Cheso 授权卡已显示。请用户在浏览器完成授权，然后回到 DSH 检查登录。等待用户回复后再继续。'),
       },
       /** 为当前站点发起授权，生成对话登录卡所需的数据。 */
       async execute(_args, exec) {
@@ -827,6 +986,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       name: 'cheso_login_wait',
       description: '用户确认已在浏览器授权后，短暂检查登录结果。若仍待授权，提示用户在授权卡中完成操作并结束回复。',
       parameters: {
+        base_url: { type: 'string', description: '本次授权卡中的 base_url。省略时使用当前对话最近一张授权卡。' },
         timeout_sec: { type: 'number', description: '兼容旧调用；此工具只做短暂检查。' },
       },
       output: {
@@ -840,9 +1000,11 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           text: value.status === 'signed_in' ? 'Cheso 已登录。' : 'Cheso 尚未完成授权，请在授权卡中继续操作。',
         }],
       },
-      /** 检查当前站点的授权结果，供用户完成浏览器授权后调用。 */
-      async execute(_args, exec) {
-        return checkLogin(currentConfig(), exec.signal);
+      /** 在登录卡所属站点确认授权。 */
+      async execute({ base_url }, exec) {
+        const config = configForSite(base_url ?? historicalLoginSite(exec.agent));
+        if (!config) throw new Error(unknownSite);
+        return checkLogin(config, exec.signal);
       },
     }),
   );
@@ -876,13 +1038,13 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         const config = currentConfig();
         const signal = exec.signal;
         try {
-          const { user } = await config.api.request<{ user?: { username?: string; user_id?: string } }>('/api/v1/whoami', { signal });
+          const { user } = await config.api.whoami(signal);
           const username = user?.username?.trim();
           const userId = user?.user_id?.trim();
           const account = username && userId ? `${username} (${userId})` : username || userId || '';
           const credits = await config.api.credits(signal).catch(error => {
             signal?.throwIfAborted();
-            if (error instanceof LoginRequired) throw error;
+            if (error instanceof LoginRequired || error instanceof FixedTokenRejected) throw error;
             return undefined;
           });
           return { signed_in: true, account, ...(credits === undefined ? {} : { credits }) };
@@ -972,15 +1134,17 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         const data = await request.json().catch(() => null);
         if (data?.action !== 'start' && data?.action !== 'check') return jsonResponse(400, { error: '无效的登录操作。' });
         // 历史登录卡仍操作卡片所属站点，即使用户已切换当前站点。
-        const config = data.site === undefined
-          ? currentConfig() : previewConfigs.find(config => config.baseUrl === data.site);
+        const config = configForSite(data.site);
         if (!config) return jsonResponse(400, {
           code: 'unknown_cheso_site',
-          error: '该站点已不在插件配置中。请检查站点设置并重新发起请求。',
+          error: unknownSite,
         });
         try {
           return jsonResponse(200, await (data.action === 'start' ? login : checkLogin)(config, request.signal));
         } catch (error) {
+          if (error instanceof FixedTokenRejected) {
+            return jsonResponse(401, { code: error.code, error: error.message });
+          }
           return jsonResponse(502, {
             ...(error instanceof LoginAttemptError ? { code: error.code } : {}),
             error: error instanceof Error ? error.message : '无法连接 Cheso 授权服务，请稍后重试。',
@@ -1011,6 +1175,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           const version = Number.isSafeInteger(requestedVersion) && requestedVersion > 0 ? requestedVersion : undefined;
           data = await config.api.file(fileId, { ...requestOptions, version });
         } catch (error) {
+          if (error instanceof FixedTokenRejected) return jsonResponse(401, { error: error.code });
           if (error instanceof LoginRequired) return jsonResponse(401, { error: 'cheso_login_required' });
           if (error instanceof ChesoApiError && error.status === 403) return jsonResponse(403, { error: 'cheso_file_forbidden' });
           return jsonResponse(502, { error: 'download_url_failed' });

@@ -30,12 +30,17 @@ const clientOptions = {
   external: ['react', 'react/jsx-runtime'],
   sourcemap: true,
   logLevel: 'info',
+  plugins: [{
+    name: 'write-dsh-client',
+    setup(build) {
+      build.onEnd(async ({ errors, outputFiles }) => {
+        if (!errors.length) await writeClient(outputFiles);
+      });
+    },
+  }],
 };
 
-async function buildClient() {
-  const result = await context(clientOptions);
-  const { outputFiles } = await result.rebuild();
-  await result.dispose();
+async function writeClient(outputFiles) {
   const js = outputFiles.find((file) => file.path.endsWith('.js'));
   const map = outputFiles.find((file) => file.path.endsWith('.map'));
   if (!js) throw new Error('client bundle missing');
@@ -58,16 +63,18 @@ async function buildClient() {
   if (map) await writeFile('lib/client.js.map', map.text);
 }
 
+const hostCtx = await context(hostOptions);
+const clientCtx = await context(clientOptions);
 if (watch) {
-  const hostCtx = await context(hostOptions);
   await hostCtx.watch();
-  const clientCtx = await context(clientOptions);
   await clientCtx.watch();
   console.log('[dsh-cheso-design] watching…');
 } else {
-  const hostCtx = await context(hostOptions);
-  await hostCtx.rebuild();
-  await hostCtx.dispose();
-  await buildClient();
+  try {
+    await hostCtx.rebuild();
+    await clientCtx.rebuild();
+  } finally {
+    await Promise.all([hostCtx.dispose(), clientCtx.dispose()]);
+  }
   console.log('[dsh-cheso-design] built lib/index.js and lib/client.js');
 }

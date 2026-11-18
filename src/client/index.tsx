@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isEmbedFormat } from '../embed-format';
+import { projectSite } from '../sites';
 import type { QuestionReceipt } from '../tasks';
 import { FileIcon } from './file-icon';
 import { dictionaries, localeNamespace, type MessageKey, type MessageParams, type Translate, type TranslatedProps } from './i18n';
@@ -230,13 +231,16 @@ type UseChat = <T>(select: (snapshot: {
 /** 在工具槽未提供会话订阅时，用空会话快照完成状态读取。 */
 const noChat: UseChat = select => select({ timeline: { turns: new Map() }, legacy: { runningCalls: [] } });
 
-/** 从等待工具的原始参数中读取任务 ID，供进度卡查找项目链接。 */
-function waitTaskId(argsRaw?: string): string | undefined {
+/** 从等待工具的参数中读取任务 ID 和站点，供进度卡查找项目链接。 */
+function waitTaskReference(argsRaw?: string) {
   try {
-    const taskId = JSON.parse(argsRaw ?? '{}')?.task_id;
-    return typeof taskId === 'string' ? taskId : undefined;
+    const args = JSON.parse(argsRaw ?? '{}');
+    return {
+      taskId: typeof args?.task_id === 'string' ? args.task_id : undefined,
+      site: typeof args?.task_site === 'string' ? args.task_site : undefined,
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -265,11 +269,19 @@ function WaitProgress({ call, useChat, t }: TranslatedProps & {
   call: ChatToolCall;
   useChat: UseChat;
 }) {
-  const taskId = waitTaskId(call.argsRaw);
+  const { taskId, site } = waitTaskReference(call.argsRaw);
   const turn = call.turn;
-  const projectUrl = useChat(snapshot => turn !== undefined && taskId
-    ? snapshot.timeline.turns.get(turn)?.data.get(ARTIFACTS_TURN_KEY)?.cards.get(taskId)?.payload.project_url
-    : undefined);
+  const projectUrl = useChat(snapshot => {
+    if (turn === undefined || !taskId) return;
+    const cards = snapshot.timeline.turns.get(turn)?.data.get(ARTIFACTS_TURN_KEY)?.cards;
+    const links = new Set<string>();
+    for (const { payload } of cards?.values() ?? []) {
+      if (payload.task_id === taskId && payload.project_url && (!site || cardTaskSite(payload) === site)) {
+        links.add(payload.project_url);
+      }
+    }
+    if (links.size === 1) return links.values().next().value;
+  });
   return (
     <div style={{ ...styles.card, background: 'var(--dsw-specific-menu, Canvas)', margin: 0 }} data-tool="cheso">
       <div style={styles.head}>
@@ -356,6 +368,8 @@ function ToolCard(props: any) {
     );
   }
   const payload = parseCard(block);
+  // 中间停止状态的卡片数据只供历史恢复；界面沿用原有的文字状态。
+  if (stopTool && payload && payload.status !== 'terminated' && !isLoginCard(payload)) return null;
   if (!payload) {
     if (projectQuery || stopTool) return null;
     return (
@@ -391,7 +405,8 @@ function LoginCard({ payload, t }: TranslatedProps & { payload: CardPayload }) {
   const login = challenge ?? payload;
   const site = login.base_url && URL.canParse(login.base_url) ? new URL(login.base_url).host : undefined;
   const expiresAt = login.expires_at ?? 0;
-  const href = expiresAt > Math.max(expiredAt, Date.now()) ? authorizationUrl(login) : undefined;
+  const tokenRejected = error === 'fixedTokenRejected';
+  const href = !tokenRejected && expiresAt > Math.max(expiredAt, Date.now()) ? authorizationUrl(login) : undefined;
   useEffect(() => {
     if (!href) return;
     const expiry = setTimeout(() => setExpiredAt(expiresAt), Math.max(0, expiresAt - Date.now()));
@@ -414,6 +429,9 @@ function LoginCard({ payload, t }: TranslatedProps & { payload: CardPayload }) {
         switch (result?.code) {
           case 'unknown_cheso_site':
             setError('loginUnknownSite');
+            break;
+          case 'fixed_token_rejected':
+            setError('fixedTokenRejected');
             break;
           case 'login_expired':
             setExpiredAt(expiresAt);
@@ -460,7 +478,7 @@ function LoginCard({ payload, t }: TranslatedProps & { payload: CardPayload }) {
         <>
           {!(error && !href) ? <div>{t(href ? 'loginInstructions' : expiresAt ? 'loginExpired' : 'loginRequired')}</div> : null}
           {href && login.user_code ? <div>{t('loginEnterCode')} <code>{login.user_code}</code></div> : null}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+          {!tokenRejected ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
             {href ? (
               <>
                 <a href={href} target="_blank" rel="noopener noreferrer" style={{ ...styles.button, textDecoration: 'none' }}>{t('loginAuthorize')}</a>
@@ -473,7 +491,7 @@ function LoginCard({ payload, t }: TranslatedProps & { payload: CardPayload }) {
                 {t(busy === 'start' ? 'loginGettingLink' : expiresAt ? 'loginGetNewLink' : 'loginGetLink')}
               </button>
             )}
-          </div>
+          </div> : null}
           {notice ? <div role="status" style={{ marginTop: 6 }}>{t(notice)}</div> : null}
           {error ? <div role="alert" style={{ ...styles.error, marginTop: 6 }}>{t(error)}</div> : null}
         </>
@@ -734,14 +752,19 @@ function isTurnTailCard(payload: CardPayload): boolean {
   return payload.status === 'terminated' || !!payload.artifacts?.length || isProjectListing(payload);
 }
 
-/** 为产物卡生成去重键，已完成的项目结果按项目链接和文件集合识别。 */
+function cardTaskSite(payload: CardPayload): string | undefined {
+  return payload.base_url || projectSite(payload.project_url);
+}
+
+/** 为卡片生成去重键，已完成的项目结果按项目链接和文件集合识别。 */
 function artifactCardKey(payload: CardPayload, callId: string): string {
   if (payload.status === 'completed' && payload.project_url) {
     // 任务结果和项目文件列表可能包含同一批文件，排列顺序可能不同。
     const files = [...new Set(payload.artifacts?.map(file => file.file_id ?? file.name))].sort();
     return JSON.stringify([payload.project_url, files]);
   }
-  return payload.task_id ?? payload.project_id ?? callId;
+  if (payload.task_id) return JSON.stringify([cardTaskSite(payload), payload.task_id]);
+  return payload.project_id ?? callId;
 }
 
 type ChesoEvent =
@@ -795,7 +818,6 @@ const artifactTurnDefinition = {
     const isActiveTask = payload.task_id && payload.status && ACTIVE_TASK_STATUSES.has(payload.status);
     if (!isTurnTailCard(payload) && !(isActiveTask && payload.project_url)) return state;
     const key = artifactCardKey(payload, callId);
-    if (payload.status === 'completed' && state.cards.get(key)?.payload.status === 'completed') return state;
     return { ...state, cards: new Map(state.cards).set(key, card) };
   },
   /** 将非空状态发布到回合位置，并复用未变化的视图数据。 */
@@ -884,6 +906,7 @@ async function requestContent(
     const result = await response.json().catch(() => null);
     // Cheso 未授权和 DSH 会话失效都可能返回 401，通过响应错误码区分。
     if (result?.error === 'cheso_login_required') throw new PreviewError('previewLoginRequired');
+    if (result?.error === 'fixed_token_rejected') throw new PreviewError('fixedTokenRejected');
     if (result?.error === 'cheso_file_forbidden') throw new PreviewError('previewForbidden');
     if (result?.error === 'unknown_cheso_site') throw new PreviewError('previewUnknownSite');
     if (response.status === 401) throw new PreviewError('previewSessionExpired');

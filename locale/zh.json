@@ -46,6 +46,7 @@
     "loginWaiting": "还没收到授权。请先在 Cheso 页面完成操作，再回来检查。",
     "loginNotStarted": "登录尚未发起或已取消。请重新获取授权链接。",
     "loginFailed": "Cheso 登录失败，请重试。",
+    "fixedTokenRejected": "Cheso 拒绝了配置的 API token。请在 DSH 配置或启动环境中更新或移除它，然后重启 DSH。",
     "loginInvalidLink": "Cheso 未返回有效的授权链接。",
     "loginUnknownSite": "该站点已不在插件配置中。请检查站点设置并重新发起请求。",
     "previewTitle": "Cheso 预览",

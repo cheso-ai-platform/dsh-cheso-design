@@ -46,6 +46,7 @@
     "loginWaiting": "Authorization is pending. Finish in Cheso, then check again.",
     "loginNotStarted": "Sign-in hasn’t started or was canceled. Get a new authorization link.",
     "loginFailed": "Could not sign in to Cheso. Try again.",
+    "fixedTokenRejected": "Cheso rejected the configured API token. Update or remove it from your DSH configuration or startup environment, then restart DSH.",
     "loginInvalidLink": "Cheso did not return a valid authorization link.",
     "loginUnknownSite": "This Cheso site is no longer configured. Check the site settings and try again.",
     "previewTitle": "Cheso preview",

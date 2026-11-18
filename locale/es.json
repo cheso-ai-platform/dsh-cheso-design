@@ -46,6 +46,7 @@
     "loginWaiting": "La autorización está pendiente. Complétala en Cheso y vuelve a comprobarla.",
     "loginNotStarted": "El inicio de sesión no se ha iniciado o se canceló. Obtén un nuevo enlace de autorización.",
     "loginFailed": "No se pudo iniciar sesión en Cheso. Inténtalo de nuevo.",
+    "fixedTokenRejected": "Cheso rechazó el token de API configurado. Actualízalo o elimínalo en la configuración o el entorno de inicio de DSH y reinicia DSH.",
     "loginInvalidLink": "Cheso no devolvió un enlace de autorización válido.",
     "loginUnknownSite": "Este sitio de Cheso ya no está configurado. Revisa los ajustes del sitio e inténtalo de nuevo.",
     "previewTitle": "Vista previa de Cheso",
