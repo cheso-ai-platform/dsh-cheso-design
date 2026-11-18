@@ -15,6 +15,7 @@
     "toolFailed": "Échec de la requête Cheso",
     "taskCompleted": "Terminé · Fichiers : {count}",
     "taskRunning": "Génération en cours",
+    "taskQueued": "En file d’attente",
     "lowCredits": "Crédits insuffisants",
     "taskFailed": "Échec",
     "taskStopped": "Arrêté",

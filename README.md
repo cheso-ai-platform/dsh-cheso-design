@@ -16,6 +16,7 @@ This repository is the public home of the `dsh-cheso-design` plugin for [DeepSee
 | --- | --- |
 | `cheso_create` | Create a task and return its `task_id` immediately |
 | `cheso_wait` | Wait for a task, pausing for your answers when needed, then return its artifact card |
+| `cheso_stop` | Stop a running Cheso task |
 | `cheso_project_files` | List an existing project's files by project id or link |
 | `cheso_login` / `cheso_login_wait` | Show the authorization card, then poll the login state |
 | `cheso_whoami` | Show the signed-in account and its credits |
@@ -42,6 +43,8 @@ The plugin activates through HMR; restart DSH if the host stops with `restart-re
 2. Ask for what you want, for example `use dsh-cheso-design to make a three-slide deck about the water cycle`, or paste a project link and ask for its artifacts.
 
 If Cheso asks about style, an outline, or another choice, use the question card to answer or explicitly skip each question. The same task resumes automatically. If the question card is unavailable, open the Cheso project to answer there, then ask DeepSeek Harness to continue waiting.
+
+While waiting, use **Steer** to send “Stop the current Cheso task.” The plugin sends a stop request to Cheso and checks the task status.
 
 Cheso cards, preview controls and site settings follow the language selected in **Settings → General**. Available languages are Chinese, English, Japanese, Spanish, French, German, Russian and Brazilian Portuguese.
 

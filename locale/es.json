@@ -15,6 +15,7 @@
     "toolFailed": "Error en la solicitud a Cheso",
     "taskCompleted": "Completado · Archivos: {count}",
     "taskRunning": "Generación en curso",
+    "taskQueued": "En cola",
     "lowCredits": "Créditos insuficientes",
     "taskFailed": "Error",
     "taskStopped": "Detenido",

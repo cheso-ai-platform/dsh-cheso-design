@@ -15,6 +15,7 @@
     "toolFailed": "Не удалось выполнить запрос к Cheso",
     "taskCompleted": "Завершено · Файлов: {count}",
     "taskRunning": "Создание продолжается",
+    "taskQueued": "В очереди",
     "lowCredits": "Недостаточно кредитов",
     "taskFailed": "Ошибка",
     "taskStopped": "Остановлено",

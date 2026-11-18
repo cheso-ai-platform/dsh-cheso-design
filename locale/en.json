@@ -15,6 +15,7 @@
     "toolFailed": "Cheso request failed",
     "taskCompleted": "Completed · Files: {count}",
     "taskRunning": "Still generating",
+    "taskQueued": "Queued",
     "lowCredits": "Not enough credits",
     "taskFailed": "Failed",
     "taskStopped": "Stopped",

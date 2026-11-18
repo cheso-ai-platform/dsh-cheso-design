@@ -15,6 +15,7 @@
     "toolFailed": "Cheso-Anfrage fehlgeschlagen",
     "taskCompleted": "Abgeschlossen · Dateien: {count}",
     "taskRunning": "Wird noch erstellt",
+    "taskQueued": "In der Warteschlange",
     "lowCredits": "Nicht genügend Guthaben",
     "taskFailed": "Fehlgeschlagen",
     "taskStopped": "Abgebrochen",

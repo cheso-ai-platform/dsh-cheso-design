@@ -484,7 +484,7 @@ function ArtifactCard({ payload, openFile, openPreview, t }: ArtifactCardProps) 
         <span style={styles.status}>{statusLabel(t, status, artifacts.length)}</span>
       </div>
       {payload.message && status !== 'insufficient_credits' ? (
-        <div style={status === 'interact' ? styles.message : styles.error}>{payload.message}</div>
+        <div style={status === 'interact' || status === 'queued' ? styles.message : styles.error}>{payload.message}</div>
       ) : null}
       {artifacts.length > 0 && (
         <div
@@ -518,6 +518,7 @@ function ArtifactCard({ payload, openFile, openPreview, t }: ArtifactCardProps) 
 
 /** 将任务状态转换为本地化文案，完成时附上文件数量。 */
 function statusLabel(t: Translate, status: string, count: number): string {
+  if (status === 'queued') return t('taskQueued');
   if (ACTIVE_TASK_STATUSES.has(status)) return t('taskRunning');
   switch (status) {
     case 'completed': return t('taskCompleted', { count });

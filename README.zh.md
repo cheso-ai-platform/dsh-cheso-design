@@ -16,6 +16,7 @@
 | --- | --- |
 | `cheso_create` | 创建任务，立即返回 `task_id` |
 | `cheso_wait` | 等待任务；有提问时先等用户操作，完成后返回在线产物卡 |
+| `cheso_stop` | 停止正在运行的 Cheso 任务 |
 | `cheso_project_files` | 按项目 ID 或完整项目链接查询已有项目的文件 |
 | `cheso_login` / `cheso_login_wait` | 显示授权卡，然后检查登录状态 |
 | `cheso_whoami` | 查看已登录账号和积分 |
@@ -42,6 +43,8 @@ dsh plugin --profile web add dsh-cheso-design
 2. 直接说要做什么，例如「使用 dsh-cheso-design 做一份三页的水循环 PPT」。也可以粘贴项目链接说「用 dsh-cheso-design 查看这个项目的产物」。
 
 如果 Cheso 询问风格、大纲或其他选项，请在问答卡上逐题回答或明确跳过。原任务会自动继续。问答卡不可用时，可以打开 Cheso 项目处理，再回到 DSH 让它继续等待。
+
+等待期间，可以用「插话发送」说「停止当前 Cheso 任务」。插件会向 Cheso 请求停止，并检查任务状态。
 
 Cheso 卡片、预览控件和站点设置跟随「设置 → 常规」中的界面语言，支持中文、英文、日语、西班牙语、法语、德语、俄语和巴西葡萄牙语。
 

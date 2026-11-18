@@ -15,6 +15,7 @@
     "toolFailed": "Cheso へのリクエストに失敗しました",
     "taskCompleted": "完了 · ファイル {count} 件",
     "taskRunning": "生成を続けています",
+    "taskQueued": "送信待ち",
     "lowCredits": "クレジット不足",
     "taskFailed": "失敗",
     "taskStopped": "中止",

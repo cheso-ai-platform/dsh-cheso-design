@@ -109,6 +109,41 @@ function transientPollError(error: unknown): boolean {
     || error instanceof ChesoApiError && (error.status === 429 || error.status >= 500);
 }
 
+/** 停止任务所在的执行链，并短暂确认 Cheso 上报的最终状态。 */
+export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: string, signal?: AbortSignal) {
+  const { id, result } = await resultFor(api, taskId, signal);
+  if (TERMINAL.has(result.status)) return { task_id: id, status: result.status };
+
+  // 刚插入的任务还在交接时，Cheso 需要从执行链上已经开始的任务接收停止请求。
+  const stopId = result.status === 'pending' ? previousTaskId ?? taskId : id;
+  try {
+    await api.request(`/api/v1/plans/${chesoId(stopId)}/terminate`, { body: {}, signal });
+  } catch (error) {
+    // 查询状态与停止之间，任务可能恰好结束或还在交接。
+    if (!(error instanceof ChesoApiError && error.code === 1101)) throw error;
+    const latest = await resultFor(api, taskId, signal);
+    if (!TERMINAL.has(latest.result.status) && latest.result.status !== 'pending') throw error;
+    return { task_id: latest.id, status: latest.result.status };
+  }
+
+  const deadline = AbortSignal.timeout(10_000);
+  const pollSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  try {
+    while (!pollSignal.aborted) {
+      const latest = await resultFor(api, id, pollSignal).catch(error => {
+        if (!transientPollError(error)) throw error;
+      });
+      if (latest && TERMINAL.has(latest.result.status)) return { task_id: latest.id, status: latest.result.status };
+      await sleep(1000, undefined, { signal: pollSignal });
+    }
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!deadline.aborted && !(error instanceof ChesoApiError || error instanceof LoginRequired)) throw error;
+  }
+  signal?.throwIfAborted();
+  return { task_id: id, status: 'stopping' };
+}
+
 /** 轮询当前任务直到结束或出现待答问题。等待超时时返回可继续查询的任务 ID。 */
 export async function waitForTask(
   api: ChesoApi, taskId: string, timeoutSec: number, knownProject: string | undefined,
@@ -223,6 +258,7 @@ export async function askWhileQuestionIsOpen(
 /** 校验用户的答案或跳过操作，确认题目仍有效后提交并返回答复记录。 */
 export async function replyToTask(
   api: ChesoApi, taskId: string, question: PendingQuestion, reply: UserQuestionAnswer, signal?: AbortSignal,
+  submissionSignal = signal,
 ): Promise<QuestionReceipt | 'changed' | 'expired'> {
   signal?.throwIfAborted();
   const questions = userQuestionsFor(question.questions);
@@ -247,6 +283,8 @@ export async function replyToTask(
   const { id, result } = await resultFor(api, taskId, signal);
   if (result.status !== 'interact' || interactionKey(id, result.interaction) !== question.key) return 'changed';
   const skip = pairs.length === 0;
+  // 插话可以打断状态查询。答复发出后，保留 Cheso 的确认，避免丢失答复记录。
+  signal?.throwIfAborted();
   try {
     await api.request(`/api/v1/plans/${chesoId(id)}/interact`, {
       body: {
@@ -256,7 +294,7 @@ export async function replyToTask(
         },
         skip,
       },
-      signal,
+      signal: submissionSignal,
     });
   } catch (error) {
     // 问题可能在状态检查后过期，此时继续等待 Cheso 更新任务状态。

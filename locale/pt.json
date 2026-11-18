@@ -15,6 +15,7 @@
     "toolFailed": "Falha na solicitação ao Cheso",
     "taskCompleted": "Concluído · Arquivos: {count}",
     "taskRunning": "Geração em andamento",
+    "taskQueued": "Na fila",
     "lowCredits": "Créditos insuficientes",
     "taskFailed": "Falha",
     "taskStopped": "Interrompido",

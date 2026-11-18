@@ -15,6 +15,7 @@
     "toolFailed": "Cheso 调用失败",
     "taskCompleted": "已完成 · {count} 个文件",
     "taskRunning": "仍在生成，稍后继续等待",
+    "taskQueued": "已排队",
     "lowCredits": "积分不足",
     "taskFailed": "任务失败",
     "taskStopped": "已终止",
