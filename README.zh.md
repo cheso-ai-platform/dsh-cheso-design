@@ -78,6 +78,33 @@ npm test           # 构建插件并运行离线 Host 测试
 
 `npm run watch` 可持续构建。改 Host 部分后需要重启 DSH；改 Client 部分随 Web 包热更新。
 
+## 发布
+
+在仓库根目录安装依赖，用有包发布权限的 npm 账号登录，然后指定发布渠道和版本。
+
+```sh
+npm ci
+npm login --registry=https://registry.npmjs.org
+npm run release -- test 0.1.1-rc.0 --dry-run
+npm run release -- test 0.1.1-rc.0
+npm run release -- stable 0.1.1
+```
+
+`test` 需要预发布版本号，发布到 `next`。测试者可以用 `npm install dsh-cheso-design@next` 安装。`stable` 需要正式版本号，发布到 `latest`。两个渠道都是公开的。
+
+两个渠道均可用 `--dry-run` 预览。脚本会执行类型检查、构建和测试，并将指定版本写入临时打包目录中的 `package.json`。
+
+### GitHub Actions 自动发布
+
+合并[发布工作流](.github/workflows/publish.yml)后，在 npm 包的设置里添加 [GitHub Actions Trusted Publisher](https://docs.npmjs.com/trusted-publishers/#configuring-trusted-publishing)。组织填 `cheso-ai-platform`，仓库填 `dsh-cheso-design`，工作流文件名填 `publish.yml`。Environment 留空，勾选允许 `npm publish`。
+
+在要发布的提交上打 tag，再推送到 GitHub。版本号须在 npm 上尚未使用。`v0.1.1-rc.0` 这类预发布 tag 会发布到 `next`，`v0.1.1` 这类正式 tag 会发布到 `latest`。
+
+```sh
+git tag v0.1.1-rc.0
+git push origin v0.1.1-rc.0
+```
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。

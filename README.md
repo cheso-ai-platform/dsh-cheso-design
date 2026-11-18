@@ -78,6 +78,33 @@ npm test           # builds the plugin and runs offline host tests
 
 `npm run watch` rebuilds continuously while you edit. Changes to the host half need a DSH restart; client changes reload with the Web bundle.
 
+## Publishing
+
+From the repository root, install dependencies and sign in with an npm account that can publish the package. Choose a channel and an explicit version.
+
+```sh
+npm ci
+npm login --registry=https://registry.npmjs.org
+npm run release -- test 0.1.1-rc.0 --dry-run
+npm run release -- test 0.1.1-rc.0
+npm run release -- stable 0.1.1
+```
+
+`test` requires a prerelease version and publishes to `next`. Testers can install it with `npm install dsh-cheso-design@next`. `stable` requires a stable version and publishes to `latest`. Both channels are public.
+
+Use `--dry-run` to preview either channel. The script type-checks, builds, runs tests, and writes the requested version to `package.json` in a temporary staging directory.
+
+### GitHub Actions
+
+After merging [the publish workflow](.github/workflows/publish.yml), open the npm package settings and add a [GitHub Actions trusted publisher](https://docs.npmjs.com/trusted-publishers/#configuring-trusted-publishing). Enter `cheso-ai-platform` as the organization, `dsh-cheso-design` as the repository, and `publish.yml` as the workflow filename. Leave Environment blank and allow `npm publish`.
+
+Push a tag for an unused npm version on the commit you want to release. A prerelease tag such as `v0.1.1-rc.0` publishes to `next`. A stable tag such as `v0.1.1` publishes to `latest`.
+
+```sh
+git tag v0.1.1-rc.0
+git push origin v0.1.1-rc.0
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
