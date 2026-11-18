@@ -57,6 +57,7 @@ export function loginErrorKey(code?: string): MessageKey {
     case 'login_denied': return 'loginDenied';
     case 'login_incomplete': return 'loginIncomplete';
     case 'unknown_cheso_site': return 'loginUnknownSite';
+    case 'fixed_token_rejected': return 'fixedTokenRejected';
     default: return 'loginFailed';
   }
 }

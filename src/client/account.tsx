@@ -74,8 +74,9 @@ export function ChesoAccountStatus({ t, disabled, showSite }: TranslatedProps & 
       setError('loginInvalidLink');
     } catch (reason) {
       if (signal?.aborted || id !== generation.current) return;
-      moveTo('signed_out');
-      setError(reason instanceof LoginRequestError ? loginErrorKey(reason.code) : 'loginFailed');
+      const key = reason instanceof LoginRequestError ? loginErrorKey(reason.code) : 'loginFailed';
+      moveTo(key === 'fixedTokenRejected' ? 'unavailable' : 'signed_out');
+      setError(key);
     } finally {
       if (!signal?.aborted && id === generation.current) setStarting(false);
     }
@@ -181,6 +182,12 @@ export function ChesoAccountStatus({ t, disabled, showSite }: TranslatedProps & 
         if (controller.signal.aborted) return;
         if (reason instanceof LoginRequestError) {
           const key = loginErrorKey(reason.code);
+          if (key === 'fixedTokenRejected') {
+            setChallenge(undefined);
+            setError(key);
+            moveTo('unavailable');
+            return;
+          }
           if (isEndedLoginAttempt(key) || key === 'loginUnknownSite') {
             setExpiredAt(deadline || Date.now());
             setNotice(key);
@@ -223,7 +230,7 @@ export function ChesoAccountStatus({ t, disabled, showSite }: TranslatedProps & 
           <span style={{ ...styles.dot, background: statusColor }} />
           <span>{statusText}{host ? <span style={styles.caption}> {t('accountSite', { host })}</span> : null}</span>
         </div>
-        {phase === 'signed_out' || phase === 'unavailable' || (phase === 'pending' && !href) ? (
+        {error !== 'fixedTokenRejected' && (phase === 'signed_out' || phase === 'unavailable' || (phase === 'pending' && !href)) ? (
           <button
             type="button"
             className="cheso-account-primary"

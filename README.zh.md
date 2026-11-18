@@ -16,6 +16,7 @@
 | --- | --- |
 | `cheso_create` | 创建任务，立即返回 `task_id` |
 | `cheso_wait` | 等待任务；有提问时先等用户操作，完成后返回在线产物卡 |
+| `cheso_stop` | 停止正在运行的 Cheso 任务 |
 | `cheso_project_files` | 按项目 ID 或完整项目链接查询已有项目的文件 |
 | `cheso_login` / `cheso_login_wait` | 显示授权卡，然后检查登录状态 |
 | `cheso_whoami` | 查看已登录账号和积分 |
@@ -43,6 +44,8 @@ dsh plugin --profile web add dsh-cheso-design
 
 如果 Cheso 询问风格、大纲或其他选项，请在问答卡上逐题回答或明确跳过。原任务会自动继续。问答卡不可用时，可以打开 Cheso 项目处理，再回到 DSH 让它继续等待。
 
+等待期间，可以用「插话发送」说「停止当前 Cheso 任务」。插件会向 Cheso 请求停止，并检查任务状态。
+
 Cheso 卡片、预览控件和站点设置跟随「设置 → 常规」中的界面语言，支持中文、英文、日语、西班牙语、法语、德语、俄语和巴西葡萄牙语。
 
 ## 配置
@@ -52,13 +55,13 @@ Cheso 卡片、预览控件和站点设置跟随「设置 → 常规」中的界
 | `site` | `configured` | `global` 使用 `https://cheso.ai`，`configured` 使用 `baseUrl` 和 `embedBaseUrl` |
 | `baseUrl` | `https://cheso.ai` | 登录和项目 API 使用的站点地址 |
 | `embedBaseUrl` | 空（跟随 `baseUrl`） | 预览页所在站点；本地联调时可指向 Vite |
-| `devSet` | 空 | 可选的 Manager 分流标识；设置后 Host 请求会带 `X-Dev-Set` 头 |
+| `devSet` | 空 | 可选的 Manager 分流标识，预览路由查询文件详情时会发送 `X-Dev-Set` |
 | `timeoutSec` | `540` | 每段任务轮询的默认上限（秒），不含用户回答时间 |
 | `token` | 空 | 可选的 API token，对应上面的 `baseUrl`；否则使用 DSH 凭据服务保存的站点授权 |
 
 ## 会离开本机的数据
 
-- 你发送的需求，以及你附加或引用的文件，会上传到所选 Cheso 站点，供其 agent 处理。
+- 你发送的需求和附加的文件会上传到所选 Cheso 站点。上传其他本地文件前，DSH 会请你确认文件路径和目标站点。
 - Cheso 授权保存在 DSH 凭据服务中，按站点区分；`cheso_logout` 会撤销该授权。
 - 预览地址由 DSH 宿主在校验访问者为本实例所有者后签发，只在浏览器内存中使用。
 
