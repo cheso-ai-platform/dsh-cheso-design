@@ -5,6 +5,7 @@ export const CHESO_CALLBACK_PATH = 'cheso/oauth/callback';
 
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
 const REFRESH_SKEW_MS = 60_000;
+const CLIENT_LOGO_URI = 'https://www.deepseek.com/favicon.ico';
 
 type GrantRecord = { kind: 'grant'; payload: unknown };
 export interface CredentialStore {
@@ -39,6 +40,7 @@ type DeviceLogin = {
 type SiteGrant = {
   clientId?: string;
   clientRedirect?: string;
+  clientLogoUri?: string;
   tokenEndpoint?: string;
   revocationEndpoint?: string;
   authorization?: Authorization;
@@ -176,7 +178,8 @@ export class ChesoAuthorization {
       /** 按当前回调地址注册 OAuth 客户端并取得客户端 ID。 */
       const register = async () => {
         const registration = await oauthRequest(sameOrigin(metadata.registration_endpoint, this.base), signal, {
-          client_name: 'Cheso for DeepSeek Harness',
+          client_name: 'DeepSeek Harness',
+          logo_uri: CLIENT_LOGO_URI,
           redirect_uris: [clientRedirect],
           grant_types: ['authorization_code', 'refresh_token'],
           response_types: ['code'],
@@ -185,9 +188,12 @@ export class ChesoAuthorization {
         if (!registration.client_id) throw new Error('Cheso 未返回 OAuth 客户端 ID。');
         return String(registration.client_id);
       };
-      // 回调地址是客户端注册的一部分，地址变化时需要重新注册。
-      let clientId = grant.clientId && grant.clientRedirect === clientRedirect ? grant.clientId : await register();
-      const registration = { ...grant, clientId, clientRedirect, tokenEndpoint, revocationEndpoint, loginError: undefined };
+      // 回调地址和应用图标属于客户端注册信息，变更后在新登录时重新注册。
+      let clientId = grant.clientId && grant.clientRedirect === clientRedirect && grant.clientLogoUri === CLIENT_LOGO_URI
+        ? grant.clientId : await register();
+      const registration = {
+        ...grant, clientId, clientRedirect, clientLogoUri: CLIENT_LOGO_URI, tokenEndpoint, revocationEndpoint, loginError: undefined,
+      };
       if (!deviceEndpoint) {
         // `state` 关联本次登录，PKCE 校验值 `verifier` 由宿主端保存，换取令牌时提交。
         const state = randomBytes(32).toString('base64url');

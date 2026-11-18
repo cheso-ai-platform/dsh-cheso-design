@@ -36,19 +36,20 @@ export function ChesoSettings({ form, t }: TranslatedProps & { form: SettingsFor
     void loadSiteOptions(controller.signal).then(result => {
       if (!controller.signal.aborted) setOptions(result);
     }).catch(() => {
-      // 宿主端版本较旧或连接失败时，仍可按配置值切换站点。
+      // 无法确认有多个域名时，保留当前站点并隐藏站点选择。
       if (!controller.signal.aborted) setOptions(null);
     });
     return () => controller.abort();
   }, []);
 
   const site = state.value?.site ?? 'configured';
-  const onlyGlobal = options?.configuredIsGlobal === true;
   const configuredHost = options?.configuredHost;
   const previewHost = options?.previewHost;
   const lockedByStartupConfig = options?.lockedByStartupConfig;
   const ready = state.status === 'ready';
-  const globalLabel = t('settingsGlobal', { host: new URL(CHESO_SITES.global).hostname });
+  const globalHost = new URL(CHESO_SITES.global).host;
+  const showSiteSelect = ready && configuredHost && configuredHost !== globalHost;
+  const showPreviewHost = ready && site === 'configured' && previewHost && previewHost !== configuredHost;
 
   /** 基于当前表单版本保存站点选择，并更新保存状态和失败提示。 */
   async function changeSite(site: ChesoSite) {
@@ -68,27 +69,25 @@ export function ChesoSettings({ form, t }: TranslatedProps & { form: SettingsFor
     <section aria-labelledby={headingId} style={styles.section}>
       <div style={styles.header}>
         <h4 id={headingId} style={styles.title}>{t('accountTitle')}</h4>
-        {ready ? (
+        {showSiteSelect ? (
           <select
             aria-label={t('settingsSite')}
             className="cheso-account-secondary"
-            value={onlyGlobal ? 'global' : site}
-            disabled={saving || !state.writable || options === undefined || lockedByStartupConfig}
+            value={site}
+            disabled={saving || !state.writable || lockedByStartupConfig}
             onChange={(event) => void changeSite(event.currentTarget.value as ChesoSite)}
             style={styles.select}
           >
-            <option value="global">{globalLabel}</option>
-            {!onlyGlobal ? <option value="configured">
-              {configuredHost ? t('settingsCustom', { host: configuredHost }) : t('settingsConfigured')}
-            </option> : null}
+            <option value="global">{globalHost}</option>
+            <option value="configured">{configuredHost}</option>
           </select>
         ) : null}
       </div>
-      {ready && !onlyGlobal ? (
+      {showSiteSelect || showPreviewHost ? (
         <p style={styles.hint}>
-          {t(lockedByStartupConfig ? 'settingsStartupLocked' : 'settingsHelp')}
-          {site === 'configured' && previewHost && previewHost !== configuredHost
-            ? <> {t('settingsPreviewHost', { host: previewHost })}</> : null}
+          {showSiteSelect ? t(lockedByStartupConfig ? 'settingsStartupLocked' : 'settingsHelp') : null}
+          {showSiteSelect && showPreviewHost ? ' ' : null}
+          {showPreviewHost ? t('settingsPreviewHost', { host: previewHost }) : null}
         </p>
       ) : null}
       {!ready ? <p role="status" style={styles.hint}>{t(state.status === 'loading' ? 'settingsLoading' : 'settingsUnavailable')}</p> : null}
