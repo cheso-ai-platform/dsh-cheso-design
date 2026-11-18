@@ -21,6 +21,7 @@
     "taskStopped": "Abgebrochen",
     "taskRolledBack": "Zurückgesetzt",
     "taskNeedsReply": "Wartet auf deine Antwort",
+    "questionRound": "Fragerunde {number}",
     "questionAnswered": "Beantwortet",
     "questionSkipped": "Übersprungen",
     "taskUnknown": "Unbekannter Status",

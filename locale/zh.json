@@ -21,6 +21,7 @@
     "taskStopped": "已终止",
     "taskRolledBack": "已回退",
     "taskNeedsReply": "等待回复",
+    "questionRound": "第 {number} 轮问答",
     "questionAnswered": "已回答",
     "questionSkipped": "已跳过",
     "taskUnknown": "状态未知",

@@ -20,7 +20,7 @@ export type UserQuestionAnswer = {
   answers: Array<{ id: string; selected: string[]; custom?: string }>;
 };
 export type QuestionPreview = { label: string; html: string };
-export type QuestionReceipt = { answers: Array<{ label: string; values: string[] }> };
+export type QuestionReceipt = { answers: Array<{ label: string; question?: string; values: string[] }> };
 
 type PendingQuestion = {
   key: string;
@@ -47,16 +47,20 @@ type WaitResult = {
   interaction?: PendingQuestion;
   repliedQuestion?: string;
 };
+type StopResult = Pick<WaitResult, 'task_id' | 'status' | 'files'>;
 const TERMINAL = new Set(['completed', 'failed', 'terminated', 'rolled_back']);
 
 /** 沿任务接续链查询结果，返回当前链尾的任务 ID 与状态。 */
 async function resultFor(api: ChesoApi, taskId: string, signal?: AbortSignal) {
   const visited = new Set<string>();
   let id = taskId;
-  // 已结束的任务阶段也可能交接给下一阶段。遍历时限制链长并检测环。
+  // 已结束的任务阶段也可能交接给下一阶段，但硬终止会结束本次执行。
   while (!visited.has(id) && visited.size < 30) {
     visited.add(id);
     const result = await api.request<PlanResult>(`/api/v1/plans/${chesoId(id)}/result`, { signal });
+    if (result.reason === 'hard_stopped' || result.status === 'hard_stopped') {
+      return { id, result: { ...result, status: 'terminated', reason: undefined } };
+    }
     if (!result.next_plan_id) return { id, result };
     id = result.next_plan_id;
   }
@@ -110,9 +114,13 @@ function transientPollError(error: unknown): boolean {
 }
 
 /** 停止任务所在的执行链，并短暂确认 Cheso 上报的最终状态。 */
-export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: string, signal?: AbortSignal) {
+export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: string, signal?: AbortSignal): Promise<StopResult> {
+  const stoppedResult = (id: string, result: PlanResult): StopResult => ({
+    task_id: id, status: result.status,
+    ...(result.status === 'terminated' ? { files: filesOf(result) } : {}),
+  });
   const { id, result } = await resultFor(api, taskId, signal);
-  if (TERMINAL.has(result.status)) return { task_id: id, status: result.status };
+  if (TERMINAL.has(result.status)) return stoppedResult(id, result);
 
   // 刚插入的任务还在交接时，Cheso 需要从执行链上已经开始的任务接收停止请求。
   const stopId = result.status === 'pending' ? previousTaskId ?? taskId : id;
@@ -123,7 +131,7 @@ export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: s
     if (!(error instanceof ChesoApiError && error.code === 1101)) throw error;
     const latest = await resultFor(api, taskId, signal);
     if (!TERMINAL.has(latest.result.status) && latest.result.status !== 'pending') throw error;
-    return { task_id: latest.id, status: latest.result.status };
+    return stoppedResult(latest.id, latest.result);
   }
 
   const deadline = AbortSignal.timeout(10_000);
@@ -133,7 +141,7 @@ export async function stopTask(api: ChesoApi, taskId: string, previousTaskId?: s
       const latest = await resultFor(api, id, pollSignal).catch(error => {
         if (!transientPollError(error)) throw error;
       });
-      if (latest && TERMINAL.has(latest.result.status)) return { task_id: latest.id, status: latest.result.status };
+      if (latest && TERMINAL.has(latest.result.status)) return stoppedResult(latest.id, latest.result);
       await sleep(1000, undefined, { signal: pollSignal });
     }
   } catch (error) {
@@ -185,6 +193,13 @@ export async function waitForTask(
   }
 
   const { result } = latest;
+  if (result.status === 'terminated') {
+    // 终止时只保留任务快照中的成品，项目目录无法判断文件属于哪次任务。
+    return {
+      task_id: current, status: result.status, project_id: knownProject, done: true,
+      files: filesOf(result), message: result.reason, answer: result.result?.text,
+    };
+  }
   const projectId = knownProject ?? (await api.request<{ project_id?: string }>(`/api/v1/plans/${chesoId(current)}`, { signal })
     .catch(error => {
       signal?.throwIfAborted();
@@ -301,5 +316,7 @@ export async function replyToTask(
     if (!(error instanceof ChesoApiError && error.code === 1101)) throw error;
     return 'expired';
   }
-  return { answers: reviewed.map(({ label, values }) => ({ label, values })) };
+  return { answers: reviewed.map(({ label, question, values }) => ({
+    label, ...(question === label ? {} : { question }), values,
+  })) };
 }

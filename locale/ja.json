@@ -21,6 +21,7 @@
     "taskStopped": "中止",
     "taskRolledBack": "ロールバック済み",
     "taskNeedsReply": "返信待ち",
+    "questionRound": "質疑応答 {number} 回目",
     "questionAnswered": "回答済み",
     "questionSkipped": "スキップ済み",
     "taskUnknown": "状態不明",

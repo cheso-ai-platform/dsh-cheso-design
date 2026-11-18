@@ -21,6 +21,7 @@
     "taskStopped": "Arrêté",
     "taskRolledBack": "Modifications annulées",
     "taskNeedsReply": "En attente de votre réponse",
+    "questionRound": "Série de questions {number}",
     "questionAnswered": "Répondu",
     "questionSkipped": "Ignoré",
     "taskUnknown": "État inconnu",

@@ -21,6 +21,7 @@
     "taskStopped": "Detenido",
     "taskRolledBack": "Cambios revertidos",
     "taskNeedsReply": "En espera de tu respuesta",
+    "questionRound": "Ronda de preguntas {number}",
     "questionAnswered": "Respondido",
     "questionSkipped": "Omitido",
     "taskUnknown": "Estado desconocido",

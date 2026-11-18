@@ -1,7 +1,7 @@
 /**
  * Cheso × DeepSeek Harness 客户端。
  *
- * 1. 工具卡显示任务状态，回合末尾从会话记录恢复产物卡。
+ * 1. 输入框上方显示任务进度，回合末尾从会话记录恢复产物卡。
  * 2. 侧栏预览标签页内嵌 `/embed/preview`，使用和 ChatGPT 卡片相同的 `postMessage` 协议握手。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -21,7 +21,10 @@ const RESOURCE_PREFIX = 'dsh-resource://cheso-file/';
 const PREVIEW_STORAGE_PREFIX = 'dsh-cheso-design.preview.v1:';
 const CARD_MARKER = '[cheso-card]';
 const ARTIFACTS_TURN_KEY = 'dsh-cheso-design-artifacts';
-const CARD_TOOLS = ['cheso_create', 'cheso_wait', 'cheso_project_files', 'cheso_login'];
+const WAIT_PROGRESS_DOCK = 'dsh-cheso-design-progress';
+const QUESTION_TIMELINE_KIND = 'dsh-cheso-design-questions';
+const QUESTION_TRAJECTORY_KIND = 'dsh-cheso-design-question-trajectory';
+const CARD_TOOLS = ['cheso_create', 'cheso_wait', 'cheso_stop', 'cheso_project_files', 'cheso_login'];
 const ACTIVE_TASK_STATUSES = new Set(['running', 'in_progress', 'pending', 'queued']);
 const CARD_INLINE_PADDING = 14;
 const ARTIFACT_ROW_HEIGHT = 38;
@@ -165,6 +168,14 @@ const styles = {
   link: { color: 'inherit', textDecoration: 'underline', fontSize: 12, opacity: 0.8 },
   message: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
   error: { color: '#dc2626', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+  progressDock: {
+    display: 'grid',
+    gap: 6,
+    width: 'min(calc(100% - 2 * var(--dsh-composer-side-clearance, 16px)), var(--dsh-composer-card-max-width, 952px))',
+    marginInline: 'auto',
+    maxHeight: 'min(40vh, 336px)',
+    overflowY: 'auto',
+  },
   preview: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
   previewHeader: {
     display: 'flex',
@@ -202,12 +213,22 @@ interface ChesoTurnLocation {
   data: { get: (key: string) => ChesoTurnState | undefined };
 }
 
+interface ChatToolCall {
+  callId: string;
+  name: string;
+  phase?: 'preparing' | 'start';
+  turn?: number;
+  argsRaw?: string;
+  subCalls: readonly ChatToolCall[];
+}
+
 type UseChat = <T>(select: (snapshot: {
   timeline: { turns: ReadonlyMap<number, ChesoTurnLocation> };
+  legacy: { runningCalls: readonly ChatToolCall[] };
 }) => T) => T;
 
 /** 在工具槽未提供会话订阅时，用空会话快照完成状态读取。 */
-const noChat: UseChat = select => select({ timeline: { turns: new Map() } });
+const noChat: UseChat = select => select({ timeline: { turns: new Map() }, legacy: { runningCalls: [] } });
 
 /** 从等待工具的原始参数中读取任务 ID，供进度卡查找项目链接。 */
 function waitTaskId(argsRaw?: string): string | undefined {
@@ -239,31 +260,48 @@ function QuestionReceipts({ receipts, t }: TranslatedProps & { receipts?: Questi
   )) ?? null;
 }
 
-/** 在等待工具运行时显示任务进度、提问预览、答复记录和项目链接。 */
-function WaitProgress({ block, callId, useChat, t }: TranslatedProps & {
-  block?: { turn?: number; argsRaw?: string };
-  callId?: string;
+/** 在输入框上方显示单次等待的任务进度和项目链接。 */
+function WaitProgress({ call, useChat, t }: TranslatedProps & {
+  call: ChatToolCall;
   useChat: UseChat;
 }) {
-  const { previews, receipts } = useQuestionActivity(callId);
-  const taskId = waitTaskId(block?.argsRaw);
-  const turn = block?.turn;
+  const taskId = waitTaskId(call.argsRaw);
+  const turn = call.turn;
   const projectUrl = useChat(snapshot => turn !== undefined && taskId
     ? snapshot.timeline.turns.get(turn)?.data.get(ARTIFACTS_TURN_KEY)?.cards.get(taskId)?.payload.project_url
     : undefined);
   return (
-    <>
-      <QuestionReceipts receipts={receipts} t={t} />
-      <div style={styles.card} data-tool="cheso">
-        <div style={styles.head}>
-          <span style={styles.dot} />
-          <span style={styles.title}>{t('task')}</span>
-          <span style={styles.status}>{t(previews ? 'taskNeedsReply' : 'generating')}</span>
-        </div>
-        {previews ? <QuestionPreviews previews={previews} /> : null}
-        {projectUrl ? <a href={projectUrl} target="_blank" rel="noreferrer" style={styles.link}>{t('openInCheso')}</a> : null}
+    <div style={{ ...styles.card, background: 'var(--dsw-specific-menu, Canvas)', margin: 0 }} data-tool="cheso">
+      <div style={styles.head}>
+        <span aria-hidden="true" style={styles.dot} />
+        <span style={styles.title}>{t('task')}</span>
+        <span role="status" style={styles.status}>{t('generating')}</span>
       </div>
-    </>
+      {projectUrl ? <a href={projectUrl} target="_blank" rel="noreferrer" style={styles.link}>{t('openInCheso')}</a> : null}
+    </div>
+  );
+}
+
+/** 从 DSH 的运行列表中提取已派发的 Cheso 等待调用，包括子调用。 */
+function runningWaits(calls: readonly ChatToolCall[]): ChatToolCall[] {
+  const waits: ChatToolCall[] = [];
+  for (const call of calls) {
+    if (call.phase !== 'start') continue;
+    if (call.name === 'cheso_wait') waits.push(call);
+    waits.push(...runningWaits(call.subCalls));
+  }
+  return waits;
+}
+
+/** 在输入框上方展示进度，让工具组折叠时也能看到。 */
+function WaitProgressDock({ useChat, t }: TranslatedProps & { useChat: UseChat }) {
+  const calls = useChat(snapshot => snapshot.legacy.runningCalls);
+  const waits = runningWaits(calls);
+  if (!waits.length) return null;
+  return (
+    <div style={styles.progressDock} data-cheso-progress="">
+      {waits.map(call => <WaitProgress key={call.callId} call={call} useChat={useChat} t={t} />)}
+    </div>
   );
 }
 
@@ -285,41 +323,15 @@ function ToolResultArtifact({ payload, callId, openFile, openPreview, useChat, t
   return visible ? <ArtifactCard payload={payload} openFile={openFile} openPreview={openPreview} t={t} /> : null;
 }
 
-/** 为工具调用渲染主卡片，并附上等待工具持久化的答复记录。 */
-function ToolCard(props: any) {
-  const { phase, block, callId, toolName, t, useChat = noChat } = props;
-  const receipts = toolName === 'cheso_wait' && phase === 'result' ? questionReceiptsOf(block?.meta) : undefined;
-  return (
-    <>
-      {receipts ? <SettledQuestionReceipts receipts={receipts} callId={callId} useChat={useChat} t={t} /> : null}
-      <ToolCardContent {...props} />
-    </>
-  );
-}
-
-/** 在答复记录尚未移到回合末尾时，将它们附在工具结果区。 */
-function SettledQuestionReceipts({ receipts, callId, useChat, t }: TranslatedProps & {
-  receipts: QuestionReceipt[];
-  callId: string;
-  useChat: UseChat;
-}) {
-  const shownInTurnTail = useChat(snapshot =>
-    Array.from(snapshot.timeline.turns.values()).some(turn =>
-      turn.status === 'closed' && turn.data.get(ARTIFACTS_TURN_KEY)?.receipts.has(callId)));
-  return shownInTurnTail ? null : <QuestionReceipts receipts={receipts} t={t} />;
-}
-
 /** 按工具类型和调用阶段渲染 Cheso 进度、错误或结果卡。 */
-function ToolCardContent(props: any) {
+function ToolCard(props: any) {
   const { phase, block, toolName, openFile, openPreview } = props;
   const t: Translate = props.t;
   const projectQuery = toolName === 'cheso_project_files';
+  const stopTool = toolName === 'cheso_stop';
   if (phase !== 'result') {
-    // 创建主要负责返回任务 ID，生成进度由等待工具统一呈现。
-    if (projectQuery || toolName === 'cheso_create') return null;
-    if (toolName === 'cheso_wait') return phase === 'start' ? (
-      <WaitProgress key={props.callId} block={block} callId={props.callId} useChat={props.useChat ?? noChat} t={t} />
-    ) : null;
+    // 任务进度在输入框上方展示。
+    if (projectQuery || stopTool || toolName === 'cheso_create' || toolName === 'cheso_wait') return null;
     return (
       <div style={styles.card} data-tool="cheso">
         <div style={styles.head}>
@@ -345,7 +357,7 @@ function ToolCardContent(props: any) {
   }
   const payload = parseCard(block);
   if (!payload) {
-    if (projectQuery) return null;
+    if (projectQuery || stopTool) return null;
     return (
       <div style={styles.card} data-tool="cheso">
         <div style={styles.head}>
@@ -358,7 +370,7 @@ function ToolCardContent(props: any) {
   if (payload.task_id && payload.status && ACTIVE_TASK_STATUSES.has(payload.status) && !payload.artifacts?.length) {
     return null;
   }
-  if (!isLoginCard(payload) && (payload.artifacts?.length || isProjectListing(payload))) {
+  if (!isLoginCard(payload) && isTurnTailCard(payload)) {
     return (
       <ToolResultArtifact payload={payload} openFile={openFile} openPreview={openPreview}
         callId={block.callId} useChat={props.useChat ?? noChat} t={t} />
@@ -579,7 +591,6 @@ function ArtifactRow({ artifact, payload, openFile, openPreview, t }: ArtifactRo
 interface ChesoTurnState {
   callIds: ReadonlySet<string>;
   cards: ReadonlyMap<string, { callId: string; payload: CardPayload }>;
-  receipts: ReadonlyMap<string, QuestionReceipt[]>;
 }
 
 /** 从工具元数据提取答复记录，校验每题的标签和答案格式。 */
@@ -589,14 +600,138 @@ function questionReceiptsOf(meta: unknown): QuestionReceipt[] | undefined {
   if (Array.isArray(receipts) && receipts.length && receipts.every(receipt =>
     Array.isArray(receipt?.answers) && receipt.answers.every((answer: any) =>
       typeof answer?.label === 'string' && Array.isArray(answer.values)
+      && (answer.question === undefined || typeof answer.question === 'string')
       && answer.values.every((value: unknown) => typeof value === 'string'),
     ),
   )) return receipts;
 }
 
+type QuestionTimelineState = { active: boolean; receipts?: QuestionReceipt[] };
+type QuestionTimelineEvent =
+  | { type: 'tool/call'; seq: number; data: { name: string; callId: string } }
+  | { type: 'tool/result'; seq: number; time: number; surfaceOp?: unknown; data: { message: { source: { callId: string } }; meta?: unknown } }
+  | { type: 'tool/ptc-dispatch-start' | 'tool/ptc-dispatch'; seq: number; time: number; data: { name: string; subCallId: string; meta?: unknown } }
+  | { type: 'other'; seq: number };
+type QuestionTimelineLocation =
+  | { kind: 'session' | 'unresolved' }
+  | { kind: 'turn'; turn: ChesoTurnLocation }
+  | { kind: 'step'; turn: ChesoTurnLocation; step: Pick<ChesoTurnLocation, 'status'> };
+type QuestionTimelineMatch = { event: QuestionTimelineEvent; location: QuestionTimelineLocation };
+
+/** 从结束事件恢复回执，也支持历史分页中只有工具结果的情况。 */
+function settledQuestion(event?: QuestionTimelineEvent): QuestionTimelineState {
+  return {
+    active: false,
+    receipts: event?.type === 'tool/result' || event?.type === 'tool/ptc-dispatch'
+      ? questionReceiptsOf(event.data.meta)
+      : undefined,
+  };
+}
+
+/** 让预览和回执跟随对应的等待调用，处在工具折叠组和输入框之外。 */
+const questionTimelineDefinition = {
+  kind: QUESTION_TIMELINE_KIND,
+  target: 'chat',
+  match(event: QuestionTimelineEvent) {
+    if (event.type === 'tool/call' && event.data.name === 'cheso_wait') {
+      return { id: event.data.callId, role: 'start' };
+    }
+    if (event.type === 'tool/result' && event.surfaceOp === 'append') {
+      return { id: event.data.message.source.callId, role: 'update' };
+    }
+    if ((event.type === 'tool/ptc-dispatch-start' || event.type === 'tool/ptc-dispatch') && event.data.name === 'cheso_wait') {
+      return { id: event.data.subCallId, role: event.type === 'tool/ptc-dispatch-start' ? 'start' : 'update' };
+    }
+    return null;
+  },
+  start(): QuestionTimelineState {
+    return { active: true };
+  },
+  update(_context: unknown, { event }: QuestionTimelineMatch): QuestionTimelineState {
+    return settledQuestion(event);
+  },
+  buildViewNode({ key, id, start, matches, state, current }: {
+    key: string; id: string; start?: QuestionTimelineMatch; matches: readonly QuestionTimelineMatch[];
+    state?: QuestionTimelineState; current: ReadonlyMap<string, object | null>;
+  }) {
+    const anchor = start ?? matches[0];
+    if (!anchor) return null;
+    const { event, location } = anchor;
+    const { active, receipts } = state ?? settledQuestion(event);
+    const running = active
+      && !(location.kind === 'step' && location.step.status === 'closed')
+      && !((location.kind === 'step' || location.kind === 'turn') && location.turn.status === 'closed');
+    if (!running && !receipts) {
+      const previous = current.get('chat');
+      return previous ? { ...previous, visibility: 'hidden' } : null;
+    }
+    return {
+      key, id, target: 'chat', kind: QUESTION_TIMELINE_KIND, location,
+      anchorSeq: event.seq + 0.1, groupTree: 'turn', visibility: 'visible',
+      data: { active: running, receipts },
+    };
+  },
+};
+
+/** 从等待结果里的持久化回执生成轨迹记录，不把用户答案再发给模型。 */
+function questionTrajectoryDefinition(t: Translate) {
+  return {
+    kind: QUESTION_TRAJECTORY_KIND,
+    target: 'trajectory',
+    match(event: QuestionTimelineEvent) {
+      if (event.type !== 'tool/result' && event.type !== 'tool/ptc-dispatch') return null;
+      if (event.type === 'tool/result' ? event.surfaceOp !== 'append' : event.data.name !== 'cheso_wait') return null;
+      return questionReceiptsOf(event.data.meta) ? { id: String(event.seq), role: 'start' } : null;
+    },
+    start(_context: unknown, { event }: QuestionTimelineMatch) {
+      return settledQuestion(event).receipts;
+    },
+    update({ state }: { state?: QuestionReceipt[] }) { return state; },
+    buildViewNode({ key, id, start, state }: {
+      key: string; id: string; start?: QuestionTimelineMatch; state?: QuestionReceipt[];
+    }) {
+      if (!start || !state?.length || !('time' in start.event)) return null;
+      const { seq, time } = start.event;
+      const text = state.map(({ answers }, index) => [
+        `Cheso · ${t('questionRound', { number: index + 1 })}`,
+        ...answers.map(({ label, question, values }) => `${question ?? label}: ${values.length ? values.join(', ') : t('questionSkipped')}`),
+      ].join('\n')).join('\n\n');
+      return {
+        key, id, kind: QUESTION_TRAJECTORY_KIND, target: 'trajectory', location: start.location, anchorSeq: seq,
+        data: { kind: 'node', node: {
+          kind: 'context', seq, time, content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: 'dsh-cheso-design' }, producer: { role: 'inject', label: 'Cheso' }, form: null,
+        } },
+      };
+    },
+  };
+}
+
+/** 原生问答卡接管输入框时，对话中的缩略图仍可见。 */
+function WaitQuestions({ node, t }: TranslatedProps & { node: { id: string; data: QuestionTimelineState } }) {
+  const { active, receipts } = node.data;
+  const activity = useQuestionActivity(active ? node.id : undefined);
+  const previews = active ? activity.previews : null;
+  return (
+    <>
+      <QuestionReceipts receipts={active ? activity.receipts : receipts} t={t} />
+      {previews?.length ? (
+        <div style={styles.card} data-cheso-question-previews="">
+          <QuestionPreviews previews={previews} />
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 /** 识别带项目 ID 且无任务 ID 的已完成文件查询。 */
 function isProjectListing(payload: CardPayload): boolean {
   return payload.status === 'completed' && !!payload.project_id && !payload.task_id;
+}
+
+/** 停止结果即使没有产物也放到回合末尾，工具折叠后仍可见。 */
+function isTurnTailCard(payload: CardPayload): boolean {
+  return payload.status === 'terminated' || !!payload.artifacts?.length || isProjectListing(payload);
 }
 
 /** 为产物卡生成去重键，已完成的项目结果按项目链接和文件集合识别。 */
@@ -613,7 +748,6 @@ type ChesoEvent =
   | { type: 'tool/call'; data: { turn: number; callId: string; name: string } }
   | { type: 'tool/result'; surfaceOp?: unknown; data: {
       turn: number;
-      meta?: unknown;
       message: { source: { callId: string }; isError?: boolean; content: readonly unknown[] };
     } }
   | { type: 'other' };
@@ -626,21 +760,19 @@ const artifactTurnDefinition = {
     if (event.type === 'tool/call' && CARD_TOOLS.includes(event.data.name)) {
       return { id: String(event.data.turn), role: 'start' };
     }
-    if (event.type === 'tool/result' && event.surfaceOp === 'append'
-      && (parseCard(event.data.message) || questionReceiptsOf(event.data.meta))) {
+    if (event.type === 'tool/result' && event.surfaceOp === 'append' && parseCard(event.data.message)) {
       return { id: String(event.data.turn), role: 'start' };
     }
     return null;
   },
-  /** 初始化回合内的工具调用、卡片与答复记录。 */
+  /** 初始化回合内的工具调用和卡片。 */
   start(_context: unknown, { event }: { event: ChesoEvent }): ChesoTurnState {
     return {
       callIds: new Set(event.type === 'tool/call' ? [event.data.callId] : []),
       cards: new Map(),
-      receipts: new Map(),
     };
   },
-  /** 将工具事件归入当前回合，合并答复记录并对登录卡和产物卡去重。 */
+  /** 将工具事件归入当前回合，并对登录卡和产物卡去重。 */
   update({ state }: { state: ChesoTurnState }, { event }: { event: ChesoEvent }): ChesoTurnState {
     if (event.type === 'tool/call') {
       return { ...state, callIds: new Set([...state.callIds, event.data.callId]) };
@@ -648,8 +780,6 @@ const artifactTurnDefinition = {
     if (event.type !== 'tool/result') return state;
     const { message } = event.data;
     if (!state.callIds.has(message.source.callId)) return state;
-    const receipts = questionReceiptsOf(event.data.meta);
-    if (receipts) state = { ...state, receipts: new Map(state.receipts).set(message.source.callId, receipts) };
     if (message.isError) return state;
     const payload = parseCard(message);
     if (!payload) return state;
@@ -663,7 +793,7 @@ const artifactTurnDefinition = {
     }
     // 产物生成前先保留项目链接，供正在运行的等待工具展示。
     const isActiveTask = payload.task_id && payload.status && ACTIVE_TASK_STATUSES.has(payload.status);
-    if (!payload.artifacts?.length && !isProjectListing(payload) && !(isActiveTask && payload.project_url)) return state;
+    if (!isTurnTailCard(payload) && !(isActiveTask && payload.project_url)) return state;
     const key = artifactCardKey(payload, callId);
     if (payload.status === 'completed' && state.cards.get(key)?.payload.status === 'completed') return state;
     return { ...state, cards: new Map(state.cards).set(key, card) };
@@ -674,7 +804,7 @@ const artifactTurnDefinition = {
     scope: string,
     previous: { value: ChesoTurnState } | null,
   ) {
-    if (scope !== 'turn' || !state || (!state.cards.size && !state.receipts.size)) return null;
+    if (scope !== 'turn' || !state?.cards.size) return null;
     if (previous?.value === state) return previous;
     return { kind: 'turn', turn: Number(id), key: ARTIFACTS_TURN_KEY, value: state };
   },
@@ -684,22 +814,14 @@ interface TurnArtifactsProps extends Omit<ArtifactCardProps, 'payload'> {
   turn: ChesoTurnLocation;
 }
 
-/** 在回合末尾显示已收录的卡片，并在回合结束后显示答复记录。 */
+/** 在回合末尾显示已收录的卡片。 */
 function TurnArtifacts({ turn, openFile, openPreview, t }: TurnArtifactsProps) {
   const state = turn.data.get(ARTIFACTS_TURN_KEY);
   if (!state) return null;
-  const cards = Array.from(state.cards, ([key, { payload }]) => {
+  return Array.from(state.cards, ([key, { payload }]) => {
     if (payload.task_id && payload.status && ACTIVE_TASK_STATUSES.has(payload.status) && !payload.artifacts?.length) return null;
     return <ArtifactCard key={key} payload={payload} openFile={openFile} openPreview={openPreview} t={t} />;
   });
-  return (
-    <>
-      {turn.status === 'closed' ? Array.from(state.receipts, ([key, receipts]) => (
-        <QuestionReceipts key={key} receipts={receipts} t={t} />
-      )) : null}
-      {cards}
-    </>
-  );
 }
 
 type PreviewFileRef = { file_id: string } & Pick<CardPayload, 'embed_base_url' | 'project_url'>;
@@ -1048,6 +1170,16 @@ export function apply(ctx: any): void {
       )),
     );
   }
+
+  ctx.slots.inject('conversation.input.dock', () =>
+    ctx.slots.register({ name: 'conversation.input.dock', id: WAIT_PROGRESS_DOCK, locale: localeNamespace }, WaitProgressDock),
+  );
+
+  ctx.uiConversation.events.register(questionTimelineDefinition);
+  ctx.uiConversation.events.register(questionTrajectoryDefinition(t));
+  ctx.slots.inject('conversation.chat.node', () =>
+    ctx.slots.register({ name: 'conversation.chat.node', key: QUESTION_TIMELINE_KIND, locale: localeNamespace }, WaitQuestions),
+  );
 
   ctx.uiConversation.events.register(artifactTurnDefinition);
   ctx.slots.inject('conversation.chat.turnTail', () =>

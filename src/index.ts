@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { defineTool, type ToolDispatchExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import z from '@deepseek-ai/schemastery';
-import { ChesoApi, ChesoApiError, chesoId } from './api';
+import { ChesoApi, ChesoApiError, chesoId, type ChesoFile } from './api';
 import { CHESO_CALLBACK_PATH, ChesoAuthorization, LoginAttemptError, LoginRequired, type CredentialStore } from './auth';
 import { isEmbedFormat } from './embed-format';
 import { uploadAttachment } from './files';
@@ -55,6 +55,9 @@ type PlanSubmission = {
   queued?: boolean;
   message?: { message_id?: string };
 };
+
+const STOP_SUMMARY = 'Cheso 任务已停止。请用一两句话告知用户，按需提及任务结果列出的成品和项目链接。不要再查询项目文件、继续等待或重新提交任务。';
+const DSH_LOGIN_REQUIRED = 'Cheso 未登录。请用户从 DSH 登录卡获取授权链接并完成浏览器授权，然后再继续。';
 
 interface StartupPatch {
   id?: string;
@@ -209,6 +212,7 @@ const waitCardSchema = {
               additionalProperties: false,
               properties: {
                 label: { type: 'string', required: true },
+                question: { type: 'string' },
                 values: { type: 'array', required: true, items: { type: 'string' } },
               },
             },
@@ -232,6 +236,32 @@ function cardPayload(view: Record<string, unknown>, config: ChesoConfig, extra: 
     embed_base_url: trimBaseUrl(config.embedBaseUrl),
     ...extra,
   });
+}
+
+/** 用任务快照展示已确认的成品，按需补齐项目链接。 */
+async function stoppedCard(
+  result: { task_id: string; project_id?: string; files?: ChesoFile[]; message?: string; answer?: string },
+  config: ChesoConfig, signal?: AbortSignal, extra?: Record<string, unknown>,
+) {
+  let projectId: string | undefined;
+  try {
+    let id = result.project_id;
+    if (!id) {
+      const deadline = AbortSignal.timeout(5000);
+      const plan = await config.api.request<{ project_id?: string }>(`/api/v1/plans/${chesoId(result.task_id)}`, {
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+      });
+      id = plan.project_id;
+    }
+    if (id) projectId = chesoId(id);
+  } catch {
+    // 获取项目链接失败时，仍返回已确认的停止状态和成品。
+    signal?.throwIfAborted();
+  }
+  return cardPayload({
+    ...result, status: 'terminated', project_id: projectId,
+    project_url: projectId ? config.api.projectUrl(projectId) : undefined,
+  }, config, extra);
 }
 
 /** 接受项目 ID 或完整项目链接，并校验链接与当前 Cheso 站点同源。 */
@@ -375,7 +405,8 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       name: 'cheso:plugin-routing',
       order: promptCtx.systemPrompt.getSectionOrder('TOOLS_SDK'),
       text:
-        'For Cheso requests in DSH, use only the dsh-cheso-design cheso_* tools. If the plugin does not support an action, direct the user to Cheso. ' +
+        'For Cheso requests in DSH, use only the native dsh-cheso-design cheso_* tools. The catalog entry named cheso is a separate CLI workflow: do not load it or run Cheso shell commands, even if that skill was loaded earlier. The two integrations have separate sign-ins. ' +
+        'Start deliverable requests with cheso_create, without a login preflight. If a tool returns login_required, direct the user to its DSH login card. Use cheso_login for an explicit sign-in request, cheso_login_wait after the user authorizes, and cheso_whoami when asked about the account. If the plugin does not support an action, direct the user to Cheso. ' +
         'When creating or revising a deliverable in a named project, call cheso_create directly with project_id. ' +
         'Copy the user’s original task wording into cheso_create.prompt verbatim, including their priorities. ' +
         'Include earlier user-provided or user-approved text only when the user explicitly refers to it. ' +
@@ -383,12 +414,13 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         'Use cheso_project_files with show_card: true when the user asks to see the project files or artifacts. ' +
         'Leave show_card unset when checking project files for your own context. ' +
         'After creation, use one cheso_wait call at a time and continue with the existing task if it is still running. ' +
+        'Treat terminated (including hard_stopped) as final. Briefly report the stop and any artifacts confirmed by the task result. Do not list project files, wait again, or resubmit the stopped task. ' +
         'If the user asks to stop a Cheso task, call cheso_stop with the task ID from this conversation. When cheso_wait yields to a stop request, handle it with cheso_stop and report the returned status. ' +
         'When cheso_wait yields to a new user message, address that message first. To pass a correction or extra instructions for the active Cheso task, call cheso_create with follow_up_task_id set to that task ID and prompt set to the user’s exact message. Wait on the returned task ID. If no task ID is returned for the follow-up, tell the user the result and link to the Cheso project without resubmitting. ' +
         'Use cheso_wait to handle every Cheso question, including follow-ups and confirmations of a revised outline. The plugin shows the original questions and submits the user’s answers or explicit skips directly. If Cheso closes the question itself, the plugin resumes waiting. ' +
         'Do not recreate Cheso questions with another tool, answer or skip on the user’s behalf, or treat a previous answer as approval of a later question. ' +
         'If cheso_wait returns interact, end the turn and direct the user to the Cheso project to answer. Do not retry until the user says they have answered or skipped there. ' +
-        'When cheso_wait returns artifacts, deliver the online result through its card and the Open in Cheso link. ' +
+        'When cheso_wait returns completed with artifacts, deliver the online result through its card and the Open in Cheso link. ' +
         'Do not query the same project again for delivery, download artifacts to the workspace, or look for local copies. ' +
         'Let DSH Host handle Cheso credentials. Do not read credential files or extract tokens. ' +
         'Only perform format conversion when the user explicitly asks to convert or export. A request to make a PPT alone does not authorize a separate export.',
@@ -442,6 +474,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       name: 'cheso_create',
       description:
         '用 dsh-cheso-design 创建或修改成品：PPT/演示文稿、海报/图片、动效视频、网页、报告等。' +
+        '直接调用本工具开始任务，由 DSH 检查授权；不需要先检查登录。' +
         '用户指定已有项目继续做时，将项目 ID 或完整链接填入 project_id，直接调用此工具。' +
         '用户更正或补充当前 Cheso 任务的需求时，传入 follow_up_task_id，把消息发到该任务的 Cheso 对话。' +
         '只有用户要求查看项目文件或任务确实需要选取某个文件时，才调用 cheso_project_files。' +
@@ -463,7 +496,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           renderCard(
             value,
             value.status === 'login_required'
-              ? '需要登录 Cheso'
+              ? DSH_LOGIN_REQUIRED
               : value.status === 'insufficient_credits'
                 ? 'Cheso 积分不足'
                 : `Cheso 任务 ${value.task_id ?? ''}：${value.status ?? ''}`,
@@ -560,6 +593,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       name: 'cheso_wait',
       description:
         '等待 Cheso 任务完成。返回 running 时，用同一个任务 ID 继续等待，同一任务一次只调用一个 cheso_wait。' +
+        '返回 terminated 时，直接总结停止状态和任务结果确认的成品。' +
         '收到用户插话时提前返回。用户要求停止任务时调用 cheso_stop。用户更正或补充任务需求时，用 cheso_create 的 follow_up_task_id 把消息发到原对话。' +
         '每轮提问（包括追问和修改后的再次确认）都由本工具展示 Cheso 原题。用户回答、跳过或 Cheso 结束提问后，继续等待同一任务。' +
         '无需另行发起问答或转发答案。不得代答、代为跳过，或将先前答复视为对新问题的确认。' +
@@ -573,15 +607,19 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
         schema: waitCardSchema,
         presentationMeta: (_args, { question_receipts }) =>
           question_receipts?.length ? { cheso_question_receipts: question_receipts } : null,
-        render: (_args, { question_receipts: _receipts, ...value }) =>
-          renderCard(
+        render: (_args, { question_receipts: _receipts, ...value }) => {
+          if (value.status === 'terminated') {
+            return renderCard(value, STOP_SUMMARY);
+          }
+          return renderCard(
             value,
             value.status === 'login_required'
-              ? '需要登录 Cheso'
+              ? DSH_LOGIN_REQUIRED
               : value.status === 'insufficient_credits'
                 ? 'Cheso 积分不足'
                 : `Cheso 任务 ${value.task_id ?? ''}：${value.status ?? ''}`,
-          ),
+          );
+        },
       },
       /** 继续轮询原站点上的任务，处理每轮提问并保留已提交的答复记录。 */
       async execute({ task_id, timeout_sec }, exec) {
@@ -607,7 +645,8 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           for (;;) {
             const repliedQuestion = pending.repliedQuestion;
             const result = await waitForTask(config.api, current, timeout, pending.projectId, waitSignal, repliedQuestion);
-            waitSignal.throwIfAborted();
+            if (result.status === 'terminated') exec.signal?.throwIfAborted();
+            else waitSignal.throwIfAborted();
             current = result.task_id;
             const routedTask = pendingTasks.get(current);
             if (routedTask?.config === config) pending = routedTask;
@@ -624,6 +663,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
                 pending.repliedQuestion = result.repliedQuestion;
               }
             }
+            if (result.status === 'terminated') return await stoppedCard(result, config, exec.signal, receiptFields());
             const interaction = result.interaction;
             if (interaction && pending.repliedQuestion === interaction.key) continue;
             const userQuestions = interaction?.questions.length && !pending.asking && exec.agent
@@ -678,19 +718,16 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
   ctx.tools.register(
     defineTool({
       name: 'cheso_stop',
-      description: '用户要求停止 Cheso 任务时，终止该任务所在的执行链。返回 Cheso 确认的最终状态，或返回 stopping 表示已发出停止请求。',
+      description: '用户要求停止 Cheso 任务时，终止该任务所在的执行链。确认终止后返回停止状态及任务结果中的成品。返回 stopping 表示已发出停止请求。',
       parameters: {
         task_id: { type: 'string', required: true, description: '要停止的 Cheso 任务 ID，来自 cheso_create 或 cheso_wait。' },
       },
       output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: { task_id: { type: 'string' }, status: { type: 'string' } },
-        },
-        render: (_args, { task_id, status }) => {
+        schema: artifactCardSchema,
+        render: (_args, value) => {
+          const { task_id, status } = value;
+          if (status === 'terminated') return renderCard(value, STOP_SUMMARY);
           const messages: Record<string, string> = {
-            terminated: 'Cheso 任务已停止。',
             stopping: 'Cheso 已收到停止请求，正在等待任务结束。',
             completed: 'Cheso 任务已完成。',
             failed: 'Cheso 任务已失败。',
@@ -703,9 +740,11 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       },
       async execute({ task_id }, exec) {
         const task = pendingTasks.get(task_id);
-        const { api } = task?.config ?? currentConfig();
+        const config = task?.config ?? currentConfig();
         try {
-          return await stopTask(api, task_id, task?.previousTaskId, exec.signal);
+          const result = await stopTask(config.api, task_id, task?.previousTaskId, exec.signal);
+          if (result.status === 'terminated') return await stoppedCard({ ...result, project_id: task?.projectId }, config, exec.signal);
+          return { task_id: result.task_id, status: result.status };
         } catch (error) {
           if (error instanceof LoginRequired) return { task_id, status: 'login_required' };
           if (error instanceof ChesoApiError && error.code === 2313) {

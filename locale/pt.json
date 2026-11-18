@@ -21,6 +21,7 @@
     "taskStopped": "Interrompido",
     "taskRolledBack": "Alterações revertidas",
     "taskNeedsReply": "Aguardando sua resposta",
+    "questionRound": "Rodada de perguntas {number}",
     "questionAnswered": "Respondido",
     "questionSkipped": "Ignorado",
     "taskUnknown": "Status desconhecido",

@@ -5,6 +5,7 @@ import { apply } from '../lib/index.js';
 const cheso = 'https://cheso.example';
 const embed = 'https://preview.example';
 const project = `${cheso}/agent/project_demo`;
+const projectFilesUrl = `${cheso}/api/v1/project/files/tree?project_id=project_demo`;
 const globalCheso = 'https://cheso.ai';
 
 function startHost({ ask, overlays } = {}) {
@@ -121,6 +122,65 @@ test('waiting follows a task handoff on the original site and returns its artifa
   ]);
 });
 
+test('a Cheso hard stop returns only task artifacts for a final reply', async t => {
+  const host = startHost();
+  const agent = { session: {} };
+  const requests = mockCheso(t, {
+    [`GET ${cheso}/api/v1/plans/plan_demo/result`]: {
+      status: 'terminated', reason: 'hard_stopped', next_plan_id: 'plan_next',
+      result: { files: [
+        { file_id: 'file_deck', name: 'slides.vppt', version: 1 },
+        { file_id: 'file_source', name: 'source.pdf', category: 'attachment' },
+      ] },
+    },
+    [`GET ${cheso}/api/v1/plans/plan_demo`]: { project_id: 'project_demo' },
+  });
+  const args = { task_id: 'plan_demo' };
+  const result = await host.call('cheso_wait', args, {
+    agent,
+    concludeTurn: () => assert.fail('The agent needs a model step to summarize the stop'),
+  });
+  assert.equal(result.task_id, args.task_id);
+  assert.equal(result.status, 'terminated');
+  assert.equal(result.message, undefined);
+  assert.equal(result.project_url, project);
+  assert.deepEqual(result.artifacts.map(file => [file.file_id, file.version]), [['file_deck', 1]]);
+  assert.deepEqual(requests.calls.map(call => `${call.arguments[1].method} ${call.arguments[0]}`), [
+    `GET ${cheso}/api/v1/plans/plan_demo/result`, `GET ${cheso}/api/v1/plans/plan_demo`,
+  ]);
+  const summary = host.output('cheso_wait').render(args, result)[0].text;
+  assert.match(summary, /任务已停止.*任务结果列出的成品/);
+  assert.match(summary, /slides\.vppt/);
+  assert.match(summary, /不要再查询项目文件、继续等待或重新提交任务/);
+});
+
+test('a stopped task with no confirmed artifacts does not fall back to the project file list', async t => {
+  const host = startHost();
+  const requests = mockCheso(t, {
+    [`GET ${cheso}/api/v1/plans/plan_demo/result`]: { status: 'terminated' },
+    [`GET ${cheso}/api/v1/plans/plan_demo`]: { project_id: 'project_demo' },
+  });
+  const args = { task_id: 'plan_demo' };
+  const result = await host.call('cheso_wait', args);
+  assert.equal(result.status, 'terminated');
+  assert.equal(result.project_url, project);
+  assert.deepEqual(result.artifacts, []);
+  assert.equal(requests.calls.some(call => call.arguments[0] === projectFilesUrl), false);
+  assert.match(host.output('cheso_wait').render(args, result)[0].text, /Cheso 任务已停止/);
+});
+
+test('creating a task without authorization directs the user to the DSH login card', async t => {
+  const host = startHost();
+  mockCheso(t, {
+    [`GET ${cheso}/api/v1/billing/credits`]: Response.json({}, { status: 401 }),
+  });
+  const args = { prompt: '制作一个 PPT' };
+  const result = await host.call('cheso_create', args);
+  assert.equal(result.status, 'login_required');
+  assert.equal(result.base_url, cheso);
+  assert.match(host.output('cheso_create').render(args, result)[0].text, /DSH 登录卡/);
+});
+
 test('user steering releases a Cheso wait and sends a correction into the original conversation', async t => {
   const host = startHost();
   const polling = Promise.withResolvers();
@@ -234,7 +294,9 @@ test('stopping follows a task handoff on the original site and confirms the remo
     [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_first', project_id: 'project_demo' },
     [`GET ${cheso}/api/v1/plans/plan_first/result`]: { status: 'completed', next_plan_id: 'plan_current' },
-    [`GET ${cheso}/api/v1/plans/plan_current/result`]: () => ({ status: stopped ? 'terminated' : 'interact' }),
+    [`GET ${cheso}/api/v1/plans/plan_current/result`]: () => stopped
+      ? { status: 'terminated', result: { files: [{ file_id: 'file_deck', name: 'saved.vppt' }] } }
+      : { status: 'interact' },
     [`POST ${cheso}/api/v1/plans/plan_current/terminate`]: () => {
       stopped = true;
       return Response.json({ code: 0 });
@@ -243,9 +305,15 @@ test('stopping follows a task handoff on the original site and confirms the remo
   const { task_id } = await host.call('cheso_create', { prompt: 'Make a slide deck' });
   host.selectSite('global');
   const args = { task_id };
-  assert.deepEqual(await host.call('cheso_stop', args), { task_id: 'plan_current', status: 'terminated' });
-  assert.deepEqual(await host.call('cheso_stop', args), { task_id: 'plan_current', status: 'terminated' });
+  const result = await host.call('cheso_stop', args);
+  assert.equal(result.task_id, 'plan_current');
+  assert.equal(result.status, 'terminated');
+  assert.equal(result.project_url, project);
+  assert.deepEqual(result.artifacts.map(file => file.file_id), ['file_deck']);
+  assert.match(host.output('cheso_stop').render(args, result)[0].text, /saved\.vppt/);
+  assert.deepEqual(await host.call('cheso_stop', args), result);
   assert.equal(requests.calls.filter(call => call.arguments[0].endsWith('/terminate')).length, 1);
+  assert.equal(requests.calls.some(call => call.arguments[0] === projectFilesUrl), false);
 });
 
 test('stopping a follow-up during handoff uses the running task in the same chain', async t => {
@@ -263,7 +331,21 @@ test('stopping a follow-up during handoff uses the running task in the same chai
   });
   const { task_id } = await host.call('cheso_create', { prompt: 'Add a cover', follow_up_task_id: 'plan_running' });
   assert.equal(task_id, 'plan_pending');
-  assert.deepEqual(await host.call('cheso_stop', { task_id }), { task_id, status: 'terminated' });
+  const result = await host.call('cheso_stop', { task_id });
+  assert.equal(result.task_id, task_id);
+  assert.equal(result.status, 'terminated');
+});
+
+test('stopping an already hard-stopped task does not send a terminate request', async t => {
+  const host = startHost();
+  const requests = mockCheso(t, {
+    [`GET ${cheso}/api/v1/plans/plan_demo/result`]: { status: 'hard_stopped' },
+    [`GET ${cheso}/api/v1/plans/plan_demo`]: {},
+  });
+  const args = { task_id: 'plan_demo' };
+  const result = await host.call('cheso_stop', args);
+  assert.equal(result.status, 'terminated');
+  assert.ok(requests.calls.every(call => call.arguments[1].method === 'GET'));
 });
 
 test('stopping reports completion when the task finishes before Cheso can stop it', async t => {
@@ -374,7 +456,7 @@ test('Cheso waits for native user answers and skips, then resumes the same task'
   const second = await asks[1].shown.promise;
   assert.deepEqual(second.questions, [{ ...confirmation, id: '1', multiSelect: false }]);
   const firstReceipt = { answers: [
-    { label: 'Design', values: ['Natural', 'with watercolor'] },
+    { label: 'Design', question: 'Style?', values: ['Natural', 'with watercolor'] },
     { label: 'Use the 11-page outline?', values: ['6 pages is enough'] },
     { label: 'Any notes?', values: [] },
   ] };

@@ -21,6 +21,7 @@
     "taskStopped": "Остановлено",
     "taskRolledBack": "Изменения отменены",
     "taskNeedsReply": "Ожидается ваш ответ",
+    "questionRound": "Раунд вопросов {number}",
     "questionAnswered": "Отвечено",
     "questionSkipped": "Пропущено",
     "taskUnknown": "Неизвестный статус",

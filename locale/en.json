@@ -21,6 +21,7 @@
     "taskStopped": "Stopped",
     "taskRolledBack": "Rolled back",
     "taskNeedsReply": "Waiting for your reply",
+    "questionRound": "Q&A round {number}",
     "questionAnswered": "Answered",
     "questionSkipped": "Skipped",
     "taskUnknown": "Unknown status",
