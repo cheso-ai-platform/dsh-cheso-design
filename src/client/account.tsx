@@ -311,8 +311,6 @@ const styles = {
     padding: '0 12px',
     border: 'none',
     borderRadius: 'var(--dsw-radius-sm, 8px)',
-    background: 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #3b82f6))',
-    color: 'var(--dsw-alias-label-on-color, #fff)',
     fontFamily: 'inherit',
     fontSize: 12,
     lineHeight: '18px',
