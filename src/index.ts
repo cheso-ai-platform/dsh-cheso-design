@@ -395,7 +395,7 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 /** 为可接收 OAuth 回调的 DSH 地址生成回调链接，允许 HTTPS 和本机回环 HTTP。 */
-function browserLoginCallback(root: string | undefined): string | undefined {
+function browserLoginCallback(root: string | undefined): URL | undefined {
   if (!root || !URL.canParse(root)) return;
   const url = new URL(root);
   if (!url.hostname || url.username || url.password || ['0.0.0.0', '[::]'].includes(url.hostname)) return;
@@ -403,7 +403,7 @@ function browserLoginCallback(root: string | undefined): string | undefined {
   // Cheso 允许回环地址使用 HTTP，其余地址必须使用 HTTPS。
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.protocol === 'https:' || (url.protocol === 'http:' && loopback)) {
-    return new URL(CHESO_CALLBACK_PATH, url).href;
+    return new URL(CHESO_CALLBACK_PATH, url);
   }
 }
 
@@ -485,22 +485,23 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       },
     };
   }, { global: true });
+  /** 发起授权和接收回调时使用同一个 DSH 对外地址。 */
+  const loginCallback = () => {
+    const webServer = ctx.get('webServer');
+    if (!webServer) return;
+    try {
+      return browserLoginCallback(ctx.get('webApp')?.getAdvertisedUrl() ?? webServer.getOrigin());
+    } catch {
+      // DSH 尚未绑定监听地址，或监听地址无法表示为 URL 时，无法取得服务器来源。
+    }
+  };
   /** 根据 DSH 对外地址选择浏览器授权或设备码授权，并返回当前挑战。 */
   const login = async (config: ChesoConfig, signal: AbortSignal) => {
     if (config.api.usesFixedToken) {
       await config.api.whoami(signal);
       return { status: 'signed_in', base_url: config.baseUrl };
     }
-    const webServer = ctx.get('webServer');
-    let root: string | undefined;
-    if (webServer) {
-      try {
-        root = ctx.get('webApp')?.getAdvertisedUrl() ?? webServer.getOrigin();
-      } catch {
-        // DSH 尚未绑定监听地址，或监听地址无法表示为 URL 时，无法取得服务器来源。
-      }
-    }
-    const redirectUri = browserLoginCallback(root);
+    const redirectUri = loginCallback()?.href;
     return { status: 'login_pending', base_url: config.baseUrl, ...await config.api.auth.start(signal, redirectUri) };
   };
   /** 短暂检查站点授权，将结果归纳为已登录、等待中或需要登录。 */
@@ -548,43 +549,56 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
   });
 
   ctx.inject(['webServer'], (webCtx: any) => {
+    async function handleCallback(request: IncomingMessage, response: ServerResponse) {
+      const headers = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' };
+      if (request.method !== 'GET') {
+        response.writeHead(405, headers).end();
+        return;
+      }
+      const query = new URL(request.url ?? '/', 'http://localhost').searchParams;
+      if (!['code', 'error', 'state'].some(key => query.has(key))) {
+        response.writeHead(404, headers).end();
+        return;
+      }
+      const issuers = query.getAll('iss');
+      const issuer = issuers.length === 1 ? issuers[0].replace(/\/+$/, '') : undefined;
+      const config = previewConfigs.find(config => config.baseUrl === issuer);
+      const base = `${(config ?? currentConfig()).baseUrl}/`;
+      const resultPath = 'oauth/callback-result';
+      if (!URL.canParse(resultPath, base)) {
+        response.writeHead(400, headers).end();
+        return;
+      }
+      const location = new URL(resultPath, base);
+      if (!['http:', 'https:'].includes(location.protocol) || location.username || location.password) {
+        response.writeHead(400, headers).end();
+        return;
+      }
+
+      // OAuth 回调是公开的，令牌交换由已保存的一次性 `state`、签发者校验和 PKCE 保护。
+      const result = config ? await config.api.auth.completeBrowser(query).catch(() => 'callback_error') : 'issuer_mismatch';
+      location.searchParams.set('status', result === 'success' ? 'success' : 'failed');
+      location.searchParams.set('client', 'dsh_cheso');
+      if (result !== 'success') location.searchParams.set('reason', result);
+      response.writeHead(303, { ...headers, location: location.href }).end();
+    }
+
+    // Cheso 的跨站跳转会被普通路由的来源检查拒绝，在准入前仅处理已公告的回调地址。
+    webCtx.on('webserver/request', async (request: IncomingMessage, response: ServerResponse, next: () => Promise<void>) => {
+      const callback = loginCallback();
+      if (!callback || request.headers.host?.toLowerCase() !== callback.host
+          || request.url?.split('?', 1)[0] !== callback.pathname) {
+        await next();
+        return;
+      }
+      await handleCallback(request, response);
+    });
+
+    // 旧版 DSH 没有 webserver/request 事件，继续通过精确路由接收回调。
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
       path: `/${CHESO_CALLBACK_PATH}`,
-      /** 使用 DSH 0.2.1 支持的 HTTP handler 接收浏览器授权回调。 */
-      async handler(request: IncomingMessage, response: ServerResponse) {
-        const headers = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' };
-        if (request.method !== 'GET') {
-          response.writeHead(405, headers).end();
-          return;
-        }
-        const query = new URL(request.url ?? '/', 'http://localhost').searchParams;
-        if (!['code', 'error', 'state'].some(key => query.has(key))) {
-          response.writeHead(404, headers).end();
-          return;
-        }
-        const issuers = query.getAll('iss');
-        const issuer = issuers.length === 1 ? issuers[0].replace(/\/+$/, '') : undefined;
-        const config = previewConfigs.find(config => config.baseUrl === issuer);
-        const base = `${(config ?? currentConfig()).baseUrl}/`;
-        const resultPath = 'oauth/callback-result';
-        if (!URL.canParse(resultPath, base)) {
-          response.writeHead(400, headers).end();
-          return;
-        }
-        const location = new URL(resultPath, base);
-        if (!['http:', 'https:'].includes(location.protocol) || location.username || location.password) {
-          response.writeHead(400, headers).end();
-          return;
-        }
-
-        // OAuth 回调是公开的，令牌交换由已保存的一次性 `state`、签发者校验和 PKCE 保护。
-        const result = config ? await config.api.auth.completeBrowser(query).catch(() => 'callback_error') : 'issuer_mismatch';
-        location.searchParams.set('status', result === 'success' ? 'success' : 'failed');
-        location.searchParams.set('client', 'dsh_cheso');
-        if (result !== 'success') location.searchParams.set('reason', result);
-        response.writeHead(303, { ...headers, location: location.href }).end();
-      },
+      handler: handleCallback,
     }), 'cheso: OAuth callback');
   });
   // ---- 工具 ----
