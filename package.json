@@ -1,6 +1,6 @@
 {
   "name": "dsh-cheso-design",
-  "version": "0.1.3",
+  "version": "0.1.4-rc.1",
   "description": "Turn your ideas, files, and research into stunning presentations, posters, videos, and more. Create, edit, and share with Cheso",
   "type": "module",
   "main": "lib/index.js",
