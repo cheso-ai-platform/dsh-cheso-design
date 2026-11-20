@@ -12,11 +12,13 @@ const project = `${cheso}/agent/project_demo`;
 const projectFilesUrl = `${cheso}/api/v1/project/files/tree?project_id=project_demo`;
 const globalCheso = 'https://cheso.ai';
 
-function startHost({ ask, overlays, credentials, attachmentStore, approveUpload, workdir, token = 'test-token' } = {}) {
+function startHost({ ask, overlays, credentials, attachmentStore, approveUpload, workdir, webUrl, token = 'test-token' } = {}) {
   const tools = new Map();
   const routes = new Map();
   const inboxListeners = new Set();
   let executeHook;
+  let webRequestHook;
+  const webServer = webUrl && { getOrigin: () => new URL(webUrl).origin, register() {} };
   let site = 'configured';
   apply({
     credentials,
@@ -31,12 +33,20 @@ function startHost({ ask, overlays, credentials, attachmentStore, approveUpload,
       }
     },
     get(service) {
+      if (service === 'webServer') return webServer;
+      if (service === 'webApp' && webUrl) return { getAdvertisedUrl: () => webUrl };
       if (service === 'profileContext' && overlays) return { overlays };
       if (service === 'userQuestions' && ask) return { ask };
       if (service === 'attachments') return attachmentStore;
       if (service === 'approval' && approveUpload) return { request: approveUpload };
     },
     inject(services, register) {
+      if (services.includes('webServer') && webServer) {
+        register({ webServer, effect: setup => setup(), on: (event, hook) => {
+          assert.equal(event, 'webserver/request');
+          webRequestHook = hook;
+        } });
+      }
       if (services.includes('connection')) {
         register({ connection: { fetch: { register: route => routes.set(route.path, route) } } });
       }
@@ -69,6 +79,14 @@ function startHost({ ask, overlays, credentials, attachmentStore, approveUpload,
     loginStatus: (siteUrl, action = 'check') => routes.get('/api/cheso/login').fetch(new Request('http://dsh.local/api/cheso/login', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, site: siteUrl }),
     })),
+    async dispatchWebRequest(request) {
+      let result;
+      await webRequestHook(request, { writeHead(status, headers) {
+        result = new Response(null, { status, headers });
+        return { end() {} };
+      } }, async () => { result = new Response('forbidden', { status: 403 }); });
+      return result;
+    },
     preview: params => routes.get('/api/cheso/preview').fetch(
       new Request(`http://dsh.local/api/cheso/preview?${new URLSearchParams(params)}`),
     ),
@@ -404,6 +422,55 @@ test('login status uses the configured token and checks expired OAuth grants', a
   });
   assert.equal((await (await fixed.loginStatus()).json()).status, 'signed_in');
   assert.equal((await (await oauth.loginStatus()).json()).status, 'login_required');
+});
+
+test('the advertised OAuth callback handles a cross-site navigation before DSH route admission', async t => {
+  let record;
+  const webUrl = 'http://127.0.0.1:3080';
+  const host = startHost({ webUrl, token: '', credentials: {
+    readRecord: async () => record,
+    modifyRecord: async (_, mutate) => (record = await mutate(record) ?? record),
+  } });
+  const requests = mockCheso(t, {
+    [`GET ${cheso}/.well-known/oauth-authorization-server`]: Response.json({
+      issuer: cheso, registration_endpoint: `${cheso}/oauth/register`,
+      authorization_endpoint: `${cheso}/oauth/authorize`, token_endpoint: `${cheso}/oauth/token`,
+    }),
+    [`POST ${cheso}/oauth/register`]: Response.json({ client_id: 'client_demo' }),
+    [`POST ${cheso}/oauth/token`]: ({ body }) => {
+      assert.equal(body.get('code'), 'test-code');
+      assert.equal(body.get('redirect_uri'), redirect.href);
+      assert.equal(createHash('sha256').update(body.get('code_verifier')).digest('base64url'), authorization.searchParams.get('code_challenge'));
+      return Response.json({ access_token: 'test-access', expires_in: 3600 });
+    },
+  });
+  const login = await host.call('cheso_login', {});
+  const authorization = new URL(login.verification_uri);
+  const redirect = new URL(authorization.searchParams.get('redirect_uri'));
+  assert.equal(redirect.href, `${webUrl}/cheso/oauth/callback`);
+  const query = new URLSearchParams({ code: 'test-code', iss: cheso, state: authorization.searchParams.get('state') });
+  const request = {
+    method: 'GET', url: `${redirect.pathname}?${query}`,
+    headers: { host: redirect.host, 'sec-fetch-site': 'cross-site' },
+  };
+
+  assert.equal((await host.dispatchWebRequest({ ...request, url: `/other${redirect.pathname}?${query}` })).status, 403);
+  assert.equal((await host.dispatchWebRequest({ ...request, headers: { ...request.headers, host: 'other.example' } })).status, 403);
+  assert.equal((await host.dispatchWebRequest({ ...request, method: 'POST' })).status, 405);
+  const invalidQuery = new URLSearchParams(query);
+  invalidQuery.set('state', 'wrong-state');
+  const invalid = await host.dispatchWebRequest({ ...request, url: `${redirect.pathname}?${invalidQuery}` });
+  assert.equal(new URL(invalid.headers.get('location')).searchParams.get('reason'), 'state_mismatch');
+  assert.equal(requests.calls.length, 2);
+
+  const response = await host.dispatchWebRequest(request);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal(response.headers.get('location'), `${cheso}/oauth/callback-result?status=success&client=dsh_cheso`);
+  assert.equal(record.payload.authorization.accessToken, 'test-access');
+  const replay = await host.dispatchWebRequest(request);
+  assert.equal(new URL(replay.headers.get('location')).searchParams.get('reason'), 'state_mismatch');
+  assert.equal(requests.calls.length, 3);
 });
 
 test('the conversation checks the login card site after switching sites', async t => {
