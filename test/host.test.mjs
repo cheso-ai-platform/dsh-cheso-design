@@ -719,7 +719,7 @@ test('a rejected fixed API token prompts configuration changes and never starts 
   mockCheso(t, {
     [`GET ${cheso}/api/v1/billing/credits`]: rejectFixedToken,
     [`GET ${cheso}/api/v1/whoami`]: rejectFixedToken,
-    [`POST ${cheso}/api/v1/files/download_url`]: rejectFixedToken,
+    [`GET ${cheso}/api/v1/files/file_demo`]: rejectFixedToken,
   });
   const message = /更新或移除 DSH 配置中的 token 或启动环境中的 CHESO_API_TOKEN/;
   for (const tool of ['cheso_create', 'cheso_login', 'cheso_login_wait', 'cheso_whoami']) {
@@ -1257,9 +1257,9 @@ test('cancelling the wait does not become a skip', async t => {
 
 test('preview uses the project site and requests the version from the card', async t => {
   const host = startHost();
-  const token = 'test-preview-grant';
+  const contentUrl = 'https://download.example/deck.vppt';
   const requests = mockCheso(t, {
-    [`POST ${cheso}/api/v1/files/download_url`]: { preview_session: token, version: 2 },
+    [`GET ${cheso}/api/v1/files/file_deck?version=2`]: { download_url: contentUrl, version: 2 },
   });
 
   host.selectSite('global');
@@ -1273,25 +1273,11 @@ test('preview uses the project site and requests the version from the card', asy
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
   const data = await response.json();
-  assert.equal(data.preview_session, token);
-  assert.equal(data.content_url, undefined);
-  assert.deepEqual(JSON.parse(requests.calls[0].arguments[1].body), {
-    file_id: 'file_deck', version: 2, for_preview: true,
-  });
+  assert.equal(data.content_url, contentUrl);
   assert.equal(data.version, 2);
   assert.equal(data.embed_url, `${embed}/embed/preview`);
   assert.equal(requests.callCount(), 1);
   assert.equal(requests.calls[0].arguments[1].headers['x-cheso-token'], 'test-token');
-});
-
-test('preview requires a grant even if Manager returns a legacy download URL', async t => {
-  const host = startHost();
-  mockCheso(t, {
-    [`POST ${cheso}/api/v1/files/download_url`]: { download_url: 'https://cdn.example/file', version: 2 },
-  });
-  const response = await host.preview({ file_id: 'file_deck', project_url: project });
-  assert.equal(response.status, 502);
-  assert.deepEqual(await response.json(), { error: 'missing_preview_session' });
 });
 
 test('preview rejects an unconfigured site before making a Cheso request', async t => {
