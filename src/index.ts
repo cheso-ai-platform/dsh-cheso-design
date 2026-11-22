@@ -1171,7 +1171,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       methods: ['GET'],
       requestBody: 'buffered',
       // DSH 在执行此处理器前验证所有者身份，Cheso 验证所请求文件的访问权限。
-      /** 按文件 ID 和可选版本返回只读预览所需的文件地址及内嵌页地址。 */
+      /** 按文件 ID 和可选版本签发只读预览会话并返回内嵌页地址。 */
       async fetch(request: Request) {
         const query = new URL(request.url).searchParams;
         // 旧版客户端的标签页刷新前，可能仍会请求文档流。
@@ -1187,19 +1187,20 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
           // 首次打开可省略版本查最新文件，续签时可指定正在预览的版本。
           const requestedVersion = Number(versionRaw);
           const version = Number.isSafeInteger(requestedVersion) && requestedVersion > 0 ? requestedVersion : undefined;
-          data = await config.api.file(fileId, { ...requestOptions, version });
+          data = await config.api.previewSession(fileId, { ...requestOptions, version });
         } catch (error) {
           if (error instanceof FixedTokenRejected) return jsonResponse(401, { error: error.code });
           if (error instanceof LoginRequired) return jsonResponse(401, { error: 'cheso_login_required' });
           if (error instanceof ChesoApiError && error.status === 403) return jsonResponse(403, { error: 'cheso_file_forbidden' });
-          return jsonResponse(502, { error: 'download_url_failed' });
+          return jsonResponse(502, { error: 'preview_session_failed' });
         }
-        const contentUrl = data?.download_url ?? data?.attachment_url;
-        if (!contentUrl) return jsonResponse(502, { error: 'missing_download_url' });
+        if (!data?.preview_session || !Number.isSafeInteger(data.version) || data.version < 1) {
+          return jsonResponse(502, { error: 'missing_preview_session' });
+        }
         return jsonResponse(200, {
-          content_url: contentUrl,
+          preview_session: data.preview_session,
           version: data.version,
-          expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+          expires_at: data.expires_at,
           embed_url: `${config.embedBaseUrl}/embed/preview`,
         });
       },
