@@ -879,7 +879,7 @@ function previewAddress(siteUrl: string, fileId: string): string {
 }
 
 interface PreviewContent {
-  content_url: string;
+  preview_session: string;
   version?: number;
   expires_at?: string;
   embed_url: string;
@@ -891,7 +891,7 @@ class PreviewError extends Error {
   }
 }
 
-/** 向宿主端查询最新或指定版本的临时预览地址，并校验文件 URL。 */
+/** 向宿主端申请最新或指定版本的预览会话。 */
 async function requestContent(
   { file_id, project_url, embed_base_url }: PreviewFileRef,
   signal?: AbortSignal,
@@ -913,9 +913,8 @@ async function requestContent(
     throw new PreviewError('previewUrlRequestFailed', { status: response.status });
   }
   const data: PreviewContent = await response.json();
-  const url = URL.canParse(data?.content_url) ? new URL(data.content_url) : undefined;
-  if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-    throw new PreviewError('previewInvalidFileUrl');
+  if (!data || typeof data.preview_session !== 'string' || !data.preview_session) {
+    throw new PreviewError('previewLoadFailed');
   }
   return data;
 }
@@ -997,28 +996,20 @@ function ChesoPreviewFrame({ params, revision, t }: TranslatedProps & { params: 
     readyRef.current = false;
   }, []);
 
-  /** 向已完成握手的 iframe 发送文件信息和临时访问地址。 */
+  /** 向已完成握手的 iframe 发送短期预览凭证。 */
   const sendLoad = useCallback(() => {
-    // 文件地址和 iframe 就绪信号可能先后到达，两者都拿到后才发送加载消息。
+    // 会话和 iframe 就绪信号都到达后才发送加载消息。
     const frame = iframeRef.current;
     const content = contentRef.current;
     if (!frame?.contentWindow || !content || !readyRef.current) return;
     frame.contentWindow.postMessage(
       {
         type: 'cheso.preview.load',
-        file: {
-          file_id: params.file_id,
-          version: content.version ?? 0,
-          name: params.name ?? `${params.file_id}.${params.format}`,
-          format: params.format,
-        },
-        content_url: content.content_url,
-        expires_at: content.expires_at,
-        ...(params.format === 'vppt' ? { vppt_layout: 'scroll' } : {}),
+        preview_session: content.preview_session,
       },
       new URL(content.embed_url).origin,
     );
-  }, [params.file_id, params.name, params.format]);
+  }, []);
 
   /** 查询文件的预览信息，并验证内嵌页地址使用 HTTP 或 HTTPS。 */
   const fetchContent = useCallback(async (signal: AbortSignal, version?: number) => {

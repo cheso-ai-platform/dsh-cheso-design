@@ -14,12 +14,10 @@ export class FixedTokenRejected extends Error {
   }
 }
 
-export type FileDetail = {
-  version?: number;
-  download_url?: string;
-  attachment_url?: string;
-  name?: string;
-  file_path?: string;
+export type PreviewGrant = {
+  preview_session: string;
+  expires_at: string;
+  version: number;
 };
 export type ChesoFile = {
   file_id: string;
@@ -110,11 +108,13 @@ export class ChesoApi {
     return this.request<{ user?: { username?: string; user_id?: string } }>('/api/v1/whoami', { signal });
   }
 
-  /** 读取指定版本的文件详情。省略版本时，读取最新版本。 */
-  file(fileId: string, { version, signal, devSet }: {
+  /** 由 Manager 核对读权限，为指定文件版本签发短期预览会话。 */
+  previewSession(fileId: string, { version, signal, devSet }: {
     version?: number; signal?: AbortSignal; devSet?: string;
-  } = {}): Promise<FileDetail> {
-    return this.request(`/api/v1/files/${chesoId(fileId)}${version ? `?version=${version}` : ''}`, { signal, devSet });
+  } = {}): Promise<PreviewGrant> {
+    return this.request('/api/v1/files/download_url', {
+      body: { file_id: fileId, version, for_preview: true }, signal, devSet,
+    });
   }
 
   /** 用已校验的项目 ID 生成当前站点的项目链接。 */
