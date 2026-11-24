@@ -608,11 +608,11 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
       name: 'cheso_create',
       description:
         '用 dsh-cheso-design 创建或修改成品：PPT/演示文稿、海报/图片、动效视频、网页、报告等。' +
-        '直接调用本工具开始任务，由 DSH 检查授权；不需要先检查登录。' +
+        '直接调用本工具开始任务，由 DSH 检查授权，Cheso 后台在创建时校验积分。' +
         '用户指定已有项目继续做时，将项目 ID 或完整链接填入 project_id，直接调用此工具。' +
         '用户更正或补充当前 Cheso 任务的需求时，传入 follow_up_task_id，把消息发到该任务的 Cheso 对话。' +
         '只有用户要求查看项目文件或任务确实需要选取某个文件时，才调用 cheso_project_files。' +
-        '创建成功后用返回的 task_id 调用一次 cheso_wait 等待结果。任务按用户的 Cheso 账号与积分执行。',
+        '创建成功后用返回的 task_id 调用一次 cheso_wait 等待结果。',
       parameters: {
         prompt: {
           type: 'string',
@@ -637,7 +637,7 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
                 : `Cheso 任务 ${value.task_id ?? ''}：${value.status ?? ''}`,
           ),
       },
-      /** 检查积分、上传参考附件并创建任务，同时记住任务所属站点。 */
+      /** 上传参考附件并创建任务，同时记住任务所属站点。 */
       async execute({ retry_call_id, task_site, ...input }, exec) {
         const session = exec.agent?.session;
         const retries = session && createRetries.get(session);
@@ -674,16 +674,6 @@ export function apply(ctx: any, pluginConfig: PluginConfig): void {
             }
             projectId = task.project_id;
             sessionId = task.session_id;
-          } else {
-            // 积分查询是创建任务的前置提示。对话补充由 Cheso 按当前任务状态处理。
-            const balance = await config.api.credits(signal).catch(error => {
-              signal?.throwIfAborted();
-              if (error instanceof LoginRequired || error instanceof FixedTokenRejected) throw error;
-              return undefined;
-            });
-            if (balance !== undefined && balance <= 0) {
-              return { status: 'insufficient_credits', message: 'Cheso 积分不足。', embed_base_url: config.embedBaseUrl };
-            }
           }
           // 补充消息的附件先上传，Cheso 在消息出队时绑定到项目。
           const attachments = files?.length

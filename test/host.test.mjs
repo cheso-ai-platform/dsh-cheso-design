@@ -121,6 +121,20 @@ function mockCheso(t, responses) {
   }).mock;
 }
 
+test('an account showing zero credits can submit a task directly to Cheso', async t => {
+  const host = startHost();
+  const requests = mockCheso(t, {
+    [`GET ${cheso}/api/v1/whoami`]: { user: { username: 'member' } },
+    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 0 }] },
+    [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_demo' },
+  });
+  assert.equal((await host.call('cheso_whoami', {})).credits, 0);
+  const beforeCreate = requests.calls.length;
+  const created = await host.call('cheso_create', { prompt: 'Draw the sky' });
+  assert.equal(created.task_id, 'plan_demo');
+  assert.deepEqual(requests.calls.slice(beforeCreate).map(call => call.arguments[0]), [`${cheso}/api/v1/plans/create`]);
+});
+
 test('local files require a DSH approval that names the destination and resolved path', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'cheso-approval-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -137,13 +151,11 @@ test('local files require a DSH approval that names the destination and resolved
       return 'rejected';
     },
   });
-  const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
-  });
+  const requests = mockCheso(t, {});
   const agent = { session: { deriveMessages: () => [] } };
   await assert.rejects(host.call('cheso_create', { prompt: 'Read this', files: ['draft.txt'] }, { agent }), /上传未获授权/);
   assert.equal(asked, true);
-  assert.equal(requests.calls.length, 1);
+  assert.equal(requests.calls.length, 0);
 });
 
 test('a user attachment uploads the verified host copy with the original filename', async t => {
@@ -164,7 +176,6 @@ test('a user attachment uploads the verified host copy with the original filenam
     },
   } });
   mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/files/presign`]: async ({ body }) => {
       assert.equal(JSON.parse(body).name, 'reference.txt');
       // Once authorized and prepared, the uploaded bytes come from the private snapshot.
@@ -200,13 +211,11 @@ test('invalid batch members and path replacement abort before any attachment is 
       return 'allowed-once';
     },
   });
-  const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
-  });
+  const requests = mockCheso(t, {});
   const args = { prompt: 'Use the references', project_id: 'project_demo' };
   await assert.rejects(host.call('cheso_create', { ...args, files: ['first.txt', 'missing.txt'] }, { agent }), /missing.txt/);
   await assert.rejects(host.call('cheso_create', { ...args, files: ['first.txt', 'second.txt'] }, { agent }), /second.txt/);
-  assert.equal(requests.calls.length, 2);
+  assert.equal(requests.calls.length, 0);
 });
 
 test('approval rejects a replaced or edited local file before making an upload request', async t => {
@@ -217,9 +226,7 @@ test('approval rejects a replaced or edited local file before making an upload r
   const timestamp = new Date('2000-01-01T00:00:00Z');
   await writeFile(replacement, 'changed');
   await utimes(replacement, timestamp, timestamp);
-  const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
-  });
+  const requests = mockCheso(t, {});
   const agent = { session: { deriveMessages: () => [] } };
   const mutations = [
     () => rename(replacement, selected),
@@ -243,7 +250,7 @@ test('approval rejects a replaced or edited local file before making an upload r
       /等待审批期间已变化/,
     );
   }
-  assert.equal(requests.calls.length, mutations.length);
+  assert.equal(requests.calls.length, 0);
 });
 
 test('an approved local file uploads when it has not changed', async t => {
@@ -253,7 +260,6 @@ test('an approved local file uploads when it has not changed', async t => {
   const host = startHost({ workdir: directory, approveUpload: async () => 'allowed-once' });
   const agent = { session: { deriveMessages: () => [] } };
   mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/files/presign`]: { file_id: 'file_reference', version: 1, upload_url: `${cheso}/storage` },
     [`PUT ${cheso}/storage`]: async ({ body }) => {
       assert.equal(await body.text(), 'approved contents');
@@ -269,7 +275,6 @@ test('an approved local file uploads when it has not changed', async t => {
 test('task routing recovers the original site from a saved tool result after restart', async t => {
   const original = startHost();
   mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_original', project_id: 'project_demo' },
     [`GET ${cheso}/api/v1/plans/plan_original/result`]: { status: 'completed', result: { files: [{ file_id: 'file_demo' }] } },
     [`GET ${cheso}/api/v1/plans/plan_original`]: { project_id: 'project_demo', session_id: 'session_demo' },
@@ -303,7 +308,6 @@ test('task routing isolates the same ID across sites and uses the matching conve
   const taskId = 'plan_shared';
   const responses = {};
   for (const [site, label] of [[cheso, 'alpha'], [globalCheso, 'beta']]) {
-    responses[`GET ${site}/api/v1/billing/credits`] = { grants: [{ amount_available: 1 }] };
     responses[`POST ${site}/api/v1/plans/create`] = { plan_id: taskId, project_id: `project_${label}` };
     responses[`GET ${site}/api/v1/plans/${taskId}/result`] = {
       status: 'completed', result: { files: [{ file_id: 'file_demo', name: `${label}.txt` }] },
@@ -516,7 +520,6 @@ test('the conversation checks the login card site after switching sites', async 
 test('waiting follows a task handoff on the original site and returns its artifact', async t => {
   const host = startHost();
   const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_first', project_id: 'project_demo' },
     [`GET ${cheso}/api/v1/plans/plan_first/result`]: { status: 'completed', next_plan_id: 'plan_second' },
     [`GET ${cheso}/api/v1/plans/plan_second/result`]: {
@@ -540,7 +543,6 @@ test('waiting follows a task handoff on the original site and returns its artifa
     { file_id: 'file_deck', name: 'slides.vppt', format: 'vppt', version: 2, category: 'result' },
   ]);
   assert.deepEqual(requests.calls.map(call => call.arguments[0]), [
-    `${cheso}/api/v1/billing/credits`,
     `${cheso}/api/v1/plans/create`,
     `${cheso}/api/v1/plans/plan_first/result`,
     `${cheso}/api/v1/plans/plan_second/result`,
@@ -628,7 +630,6 @@ test('a login retry preserves the original task, site and user attachment after 
   });
   const requests = mockCheso(t, {
     [`GET ${cheso}/api/v1/whoami`]: { user: { username: 'original-account' } },
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/files/presign`]: ({ body }) => {
       assert.equal(JSON.parse(body).name, 'reference.txt');
       return { file_id: 'file_original', version: 1, upload_url: `${cheso}/storage` };
@@ -692,14 +693,13 @@ test('a login retry preserves the original task, site and user attachment after 
   await writeFile(file, 'modified since upload to DSH');
   const beforeRetry = requests.calls.length;
   await assert.rejects(host.call('cheso_create', { retry_call_id: secondBlocked.retry_call_id }, { agent }), /附件.*已变化/);
-  assert.deepEqual(requests.calls.slice(beforeRetry).map(call => call.arguments[0]), [`${cheso}/api/v1/billing/credits`]);
+  assert.equal(requests.calls.length, beforeRetry);
 });
 
 test('fresh creation can explicitly select the original site without a follow-up task ID', async t => {
   const host = startHost();
   host.selectSite('global');
   mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_original' },
   });
   const result = await host.call('cheso_create', { prompt: 'Make a presentation', task_site: cheso });
@@ -717,7 +717,7 @@ test('a rejected fixed API token prompts configuration changes and never starts 
     return new Response(null, { status: 401 });
   };
   mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: rejectFixedToken,
+    [`POST ${cheso}/api/v1/plans/create`]: rejectFixedToken,
     [`GET ${cheso}/api/v1/whoami`]: rejectFixedToken,
     [`GET ${cheso}/api/v1/files/file_demo`]: rejectFixedToken,
   });
@@ -744,7 +744,6 @@ test('user steering releases a Cheso wait and sends a correction into the origin
   let firstPoll = true;
   const submissions = [];
   const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: ({ body }) => {
       submissions.push(JSON.parse(body));
       return submissions.length === 1 ? { plan_id: 'plan_first', project_id: 'project_demo' }
@@ -849,7 +848,6 @@ test('stopping follows a task handoff on the original site and confirms the remo
   const host = startHost();
   let stopped = false;
   const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_first', project_id: 'project_demo' },
     [`GET ${cheso}/api/v1/plans/plan_first/result`]: { status: 'completed', next_plan_id: 'plan_current' },
     [`GET ${cheso}/api/v1/plans/plan_current/result`]: () => stopped
@@ -1041,7 +1039,6 @@ test('Cheso waits for native user answers and skips, then resumes the same task'
   let next = { status: 'interact', interaction: { tool_call_id: 'question_first', questions: firstQuestions } };
   const submissions = [];
   const requests = mockCheso(t, {
-    [`GET ${cheso}/api/v1/billing/credits`]: { grants: [{ amount_available: 1 }] },
     [`POST ${cheso}/api/v1/plans/create`]: { plan_id: 'plan_first', project_id: 'project_demo' },
     [`GET ${cheso}/api/v1/plans/plan_first/result`]: { status: 'completed', next_plan_id: 'plan_second' },
     [resultPath]: () => next,
